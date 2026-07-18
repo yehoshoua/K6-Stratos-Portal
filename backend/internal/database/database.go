@@ -280,6 +280,7 @@ func (db *DB) createTables() error {
 		name TEXT NOT NULL,
 		role TEXT NOT NULL,
 		scopes TEXT DEFAULT '',
+		owned_by TEXT DEFAULT '',
 		created_at TIMESTAMP NOT NULL,
 		expires_at TIMESTAMP
 	);`
@@ -517,8 +518,37 @@ func (db *DB) createTables() error {
 		}
 	}
 
+	// Migration: Add owned_by column to api_tokens table if it does not exist.
+	// Empty string = admin-managed token; non-empty = self-service token owned by that username.
+	var hasOwnedBy bool
+	if db.driver == "postgres" {
+		_ = db.conn.QueryRow("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='api_tokens' AND column_name='owned_by');").Scan(&hasOwnedBy)
+	} else {
+		ownedByRows, err := db.conn.Query("PRAGMA table_info(api_tokens);")
+		if err == nil {
+			for ownedByRows.Next() {
+				var cid int
+				var cname, ctype string
+				var notnull, pk int
+				var dfltVal sql.NullString
+				if err := ownedByRows.Scan(&cid, &cname, &ctype, &notnull, &dfltVal, &pk); err == nil {
+					if cname == "owned_by" {
+						hasOwnedBy = true
+					}
+				}
+			}
+			ownedByRows.Close()
+		}
+	}
+	if !hasOwnedBy {
+		if _, err := db.conn.Exec("ALTER TABLE api_tokens ADD COLUMN owned_by TEXT DEFAULT '';"); err != nil {
+			log.Printf("Warning: failed to migrate owned_by column on api_tokens: %v", err)
+		}
+	}
+
 	return nil
 }
+
 
 func (db *DB) SaveCluster(c *ClusterConfig) error {
 	var query string
@@ -1106,18 +1136,21 @@ type APIToken struct {
 	Name      string     `json:"name"`
 	Role      string     `json:"role"`
 	Scopes    string     `json:"scopes"`
+	// OwnedBy is empty for admin-managed tokens and set to the creator's
+	// username for self-service tokens created via POST /api/v1/me/tokens.
+	OwnedBy   string     `json:"owned_by"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at"`
 }
 
-func (db *DB) SaveAPIToken(tokenHash string, name string, role string, scopes string, expiresAt *time.Time) error {
-	query := db.rebind(`INSERT INTO api_tokens (token_hash, name, role, scopes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?);`)
-	_, err := db.conn.Exec(query, tokenHash, name, role, scopes, time.Now(), expiresAt)
+func (db *DB) SaveAPIToken(tokenHash string, name string, role string, scopes string, ownedBy string, expiresAt *time.Time) error {
+	query := db.rebind(`INSERT INTO api_tokens (token_hash, name, role, scopes, owned_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?);`)
+	_, err := db.conn.Exec(query, tokenHash, name, role, scopes, ownedBy, time.Now(), expiresAt)
 	return err
 }
 
 func (db *DB) ListAPITokens() ([]*APIToken, error) {
-	query := db.rebind(`SELECT token_hash, name, role, scopes, created_at, expires_at FROM api_tokens ORDER BY created_at DESC;`)
+	query := db.rebind(`SELECT token_hash, name, role, scopes, COALESCE(owned_by,''), created_at, expires_at FROM api_tokens ORDER BY created_at DESC;`)
 	rows, err := db.conn.Query(query)
 	if err != nil {
 		return nil, err
@@ -1127,7 +1160,30 @@ func (db *DB) ListAPITokens() ([]*APIToken, error) {
 	var tokens []*APIToken
 	for rows.Next() {
 		var t APIToken
-		err := rows.Scan(&t.TokenHash, &t.Name, &t.Role, &t.Scopes, &t.CreatedAt, &t.ExpiresAt)
+		err := rows.Scan(&t.TokenHash, &t.Name, &t.Role, &t.Scopes, &t.OwnedBy, &t.CreatedAt, &t.ExpiresAt)
+		if err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, &t)
+	}
+	return tokens, nil
+}
+
+// ListAPITokensByOwner returns only tokens created by the given user via
+// the self-service endpoint (owned_by = username). Admin-managed tokens
+// (owned_by empty) are excluded.
+func (db *DB) ListAPITokensByOwner(username string) ([]*APIToken, error) {
+	query := db.rebind(`SELECT token_hash, name, role, scopes, COALESCE(owned_by,''), created_at, expires_at FROM api_tokens WHERE owned_by = ? ORDER BY created_at DESC;`)
+	rows, err := db.conn.Query(query, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []*APIToken
+	for rows.Next() {
+		var t APIToken
+		err := rows.Scan(&t.TokenHash, &t.Name, &t.Role, &t.Scopes, &t.OwnedBy, &t.CreatedAt, &t.ExpiresAt)
 		if err != nil {
 			return nil, err
 		}
@@ -1142,10 +1198,23 @@ func (db *DB) DeleteAPIToken(tokenHash string) error {
 	return err
 }
 
+// DeleteAPITokenByHashAndOwner deletes a token only if it belongs to the
+// specified owner. Returns (false, nil) if the token exists but belongs to
+// someone else (caller should return 403), (false, err) on DB error.
+func (db *DB) DeleteAPITokenByHashAndOwner(tokenHash, owner string) (deleted bool, err error) {
+	query := db.rebind(`DELETE FROM api_tokens WHERE token_hash = ? AND owned_by = ?;`)
+	res, err := db.conn.Exec(query, tokenHash, owner)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 func (db *DB) GetAPITokenByHash(tokenHash string) (*APIToken, error) {
-	query := db.rebind(`SELECT token_hash, name, role, scopes, created_at, expires_at FROM api_tokens WHERE token_hash = ? LIMIT 1;`)
+	query := db.rebind(`SELECT token_hash, name, role, scopes, COALESCE(owned_by,''), created_at, expires_at FROM api_tokens WHERE token_hash = ? LIMIT 1;`)
 	var t APIToken
-	err := db.conn.QueryRow(query, tokenHash).Scan(&t.TokenHash, &t.Name, &t.Role, &t.Scopes, &t.CreatedAt, &t.ExpiresAt)
+	err := db.conn.QueryRow(query, tokenHash).Scan(&t.TokenHash, &t.Name, &t.Role, &t.Scopes, &t.OwnedBy, &t.CreatedAt, &t.ExpiresAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil

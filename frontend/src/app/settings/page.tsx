@@ -861,6 +861,18 @@ ${stagesStr}
   const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
   const [copiedToken, setCopiedToken] = useState(false);
 
+  // Self-service personal tokens state (available to all authenticated users)
+  const [myTokens, setMyTokens] = useState<APIToken[]>([]);
+  const [loadingMyTokens, setLoadingMyTokens] = useState(false);
+  const [myTokenName, setMyTokenName] = useState('');
+  const [myTokenExpiry, setMyTokenExpiry] = useState(7);
+  const [myGeneratedToken, setMyGeneratedToken] = useState<APIToken | null>(null);
+  const [isMyTokenModalOpen, setIsMyTokenModalOpen] = useState(false);
+  const [copiedMyToken, setCopiedMyToken] = useState(false);
+  const [myTokenRevokeTarget, setMyTokenRevokeTarget] = useState<APIToken | null>(null);
+  const [myTokenCreating, setMyTokenCreating] = useState(false);
+  const [myTokenError, setMyTokenError] = useState('');
+
   // SSO state
   const [ssoConfig, setSsoConfig] = useState<SSOConfig>({
     name: '',
@@ -1112,6 +1124,55 @@ ${stagesStr}
     );
   };
 
+  // --- Self-service (personal) token handlers ---
+  const loadMyTokens = async () => {
+    try {
+      setLoadingMyTokens(true);
+      const list = await api.listMyTokens();
+      setMyTokens(list || []);
+    } catch (err) {
+      console.error('Failed to load personal tokens', err);
+    } finally {
+      setLoadingMyTokens(false);
+    }
+  };
+
+  const handleCreateMyToken = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!myTokenName) return;
+    setMyTokenCreating(true);
+    setMyTokenError('');
+    try {
+      const tok = await api.createMyToken(myTokenName, myTokenExpiry);
+      setMyGeneratedToken(tok);
+      setIsMyTokenModalOpen(true);
+      setMyTokenName('');
+      setMyTokenExpiry(7);
+      await loadMyTokens();
+    } catch (err: any) {
+      setMyTokenError(err.message || t('personalTokenCreateFailed'));
+    } finally {
+      setMyTokenCreating(false);
+    }
+  };
+
+  const handleRevokeMyToken = (tok: APIToken) => {
+    setMyTokenRevokeTarget(tok);
+  };
+
+  const confirmRevokeMyToken = async () => {
+    if (!myTokenRevokeTarget) return;
+    try {
+      await api.revokeMyToken(myTokenRevokeTarget.token_hash);
+      showToast(t('personalTokenRevokeSuccess'), 'success');
+      await loadMyTokens();
+    } catch (err: any) {
+      showToast(err.message || t('personalTokenRevokeFailed'), 'error');
+    } finally {
+      setMyTokenRevokeTarget(null);
+    }
+  };
+
   const loadDiscoveryConfig = async () => {
     try {
       const cfg = await api.getEKSDiscoveryConfig();
@@ -1190,6 +1251,14 @@ ${stagesStr}
     if (isAdmin) {
       loadSettingsData();
     }
+  }, [isAdmin]);
+
+  // Load personal tokens for all authenticated users on mount.
+  useEffect(() => {
+    if (isAdmin !== null) {
+      loadMyTokens();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin]);
 
   const handleStartEdit = async (c: ClusterConfig) => {
@@ -2199,7 +2268,129 @@ ${stagesStr}
         </div>
       </div>
 
+      {/* My Tokens — Self-Service Section (visible to all authenticated users) */}
+      <div className="bg-slate-900/40 border border-slate-800/80 rounded-3xl p-6 backdrop-blur-md space-y-6 animate-fadeIn">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+              <Key className="w-5 h-5 text-emerald-400" />
+              <span>{t('myTokens')}</span>
+            </h3>
+            <p className="text-slate-500 text-xs mt-1">{t('myTokensSubtitle')}</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Token creation form */}
+          <div className="bg-slate-950/40 border border-slate-800/60 rounded-2xl p-5 space-y-4 lg:col-span-1">
+            <h4 className="text-sm font-semibold text-white">{t('createPersonalToken')}</h4>
+            <form onSubmit={handleCreateMyToken} className="space-y-4">
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">{t('personalTokenName')}</label>
+                <input
+                  id="personal-token-name"
+                  type="text"
+                  required
+                  placeholder="e.g. CI Pipeline"
+                  value={myTokenName}
+                  onChange={(e) => setMyTokenName(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:border-emerald-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+                  {t('personalTokenExpiry')} — <span className="text-emerald-400">{t('personalTokenMaxDays')}</span>
+                </label>
+                <select
+                  id="personal-token-expiry"
+                  value={myTokenExpiry}
+                  onChange={(e) => setMyTokenExpiry(Number(e.target.value))}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:border-emerald-500 outline-none font-sans"
+                >
+                  {[1, 2, 3, 4, 5, 6, 7].map((d) => (
+                    <option key={d} value={d}>{d} {d === 1 ? 'day' : 'days'}</option>
+                  ))}
+                </select>
+              </div>
+
+              {myTokenError && (
+                <p className="text-red-400 text-xs">{myTokenError}</p>
+              )}
+
+              <button
+                id="create-personal-token-btn"
+                type="submit"
+                disabled={myTokenCreating}
+                className="w-full py-2.5 bg-gradient-to-r from-emerald-600 to-teal-500 text-white rounded-xl text-xs font-semibold shadow-md hover:scale-102 active:scale-98 transition cursor-pointer disabled:opacity-50"
+              >
+                {myTokenCreating ? t('loading') : t('createPersonalToken')}
+              </button>
+            </form>
+          </div>
+
+          {/* Personal tokens list */}
+          <div className="lg:col-span-2 space-y-3">
+            {loadingMyTokens ? (
+              <div className="py-12 text-center text-slate-500 text-xs">{t('loading')}</div>
+            ) : myTokens.length === 0 ? (
+              <div className="py-12 text-center text-slate-500 text-xs">{t('myTokensEmpty')}</div>
+            ) : (
+              <div className="space-y-3 max-h-[350px] overflow-y-auto pr-2">
+                {myTokens.map((tok) => {
+                  const isExpired = tok.expires_at ? new Date(tok.expires_at) < new Date() : false;
+                  return (
+                    <div
+                      key={tok.token_hash}
+                      className="flex items-center justify-between p-4 bg-slate-950/40 border border-slate-800/60 rounded-2xl"
+                    >
+                      <div className="flex items-center space-x-3 min-w-0">
+                        <div className="p-2.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-xl shrink-0">
+                          <Key className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center space-x-2">
+                            <p className="text-xs font-semibold text-slate-200 truncate">{tok.name}</p>
+                            <span className={`px-1.5 py-0.5 border rounded-md text-[8px] font-semibold uppercase tracking-wider ${
+                              isExpired
+                                ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                                : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                            }`}>
+                              {isExpired ? t('tokenExpired') : t('tokenActive')}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-[9px] text-slate-500 font-mono">
+                            <span>{t('createdAt')}: {new Date(tok.created_at).toLocaleDateString(lang)}</span>
+                            {tok.expires_at && (
+                              <span className={isExpired ? 'text-red-400 font-semibold' : 'text-slate-400 font-semibold'}>
+                                {t('expiresAt')}: {new Date(tok.expires_at).toLocaleDateString(lang)}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex space-x-1 shrink-0">
+                        <button
+                          id={`revoke-my-token-${tok.token_hash.slice(0, 8)}`}
+                          onClick={() => handleRevokeMyToken(tok)}
+                          title={t('revokeToken')}
+                          className="p-2 border border-transparent hover:border-red-500/25 hover:bg-red-500/10 text-slate-500 hover:text-red-400 rounded-xl transition cursor-pointer"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* API Tokens Section */}
+
       <div className="bg-slate-900/40 border border-slate-800/80 rounded-3xl p-6 backdrop-blur-md space-y-6 animate-fadeIn">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-bold text-white flex items-center gap-2">
@@ -2365,7 +2556,85 @@ ${stagesStr}
         </div>
       )}
 
+      {/* Personal Token Created Dialog Modal */}
+      {isMyTokenModalOpen && myGeneratedToken && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 shadow-2xl relative space-y-4">
+            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+              <span>{t('personalTokenCreateSuccess')}</span>
+            </h3>
+
+            <p className="text-slate-300 text-xs">
+              {t('personalTokenCreatedOnce')}
+            </p>
+
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-xs break-all text-emerald-400 select-all relative flex items-center justify-between gap-4">
+              <span>{myGeneratedToken.token}</span>
+              <button
+                id="copy-my-token-btn"
+                onClick={() => {
+                  if (myGeneratedToken.token) {
+                    navigator.clipboard.writeText(myGeneratedToken.token);
+                    setCopiedMyToken(true);
+                    setTimeout(() => setCopiedMyToken(false), 2000);
+                  }
+                }}
+                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-[10px] font-semibold shrink-0 cursor-pointer transition active:scale-95"
+              >
+                {copiedMyToken ? t('copied') : t('copy')}
+              </button>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                id="close-my-token-modal-btn"
+                onClick={() => {
+                  setIsMyTokenModalOpen(false);
+                  setMyGeneratedToken(null);
+                }}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold cursor-pointer transition"
+              >
+                {t('cancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Personal Token Revoke Confirmation Dialog */}
+      {myTokenRevokeTarget && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-sm p-6 shadow-2xl space-y-5">
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <Trash2 className="w-4 h-4 text-red-400" />
+              <span>{t('revokeToken')}</span>
+            </h3>
+            <p className="text-slate-400 text-xs">
+              {t('revokeTokenConfirm').replace('{name}', myTokenRevokeTarget.name)}
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                id="cancel-revoke-my-token-btn"
+                onClick={() => setMyTokenRevokeTarget(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold cursor-pointer transition"
+              >
+                {t('cancel')}
+              </button>
+              <button
+                id="confirm-revoke-my-token-btn"
+                onClick={confirmRevokeMyToken}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-semibold cursor-pointer transition"
+              >
+                {t('revokeToken')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Register Cluster Modal */}
+
       {isModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-xl p-8 shadow-2xl relative">

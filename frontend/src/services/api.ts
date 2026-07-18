@@ -135,6 +135,8 @@ export interface APIToken {
   token_hash: string;
   name: string;
   role: string;
+  scopes?: string;
+  owned_by?: string;
   created_at: string;
   expires_at?: string;
   token?: string;
@@ -779,6 +781,39 @@ export const api = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Failed to delete API token' }));
       throw new Error(err.error || 'Failed to delete API token');
+    }
+  },
+
+  // Self-service personal tokens (all authenticated users, max 7 days)
+  async listMyTokens(): Promise<APIToken[]> {
+    const res = await apiFetch(`${BASE_URL}/v1/me/tokens`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Failed to fetch personal tokens');
+    return res.json();
+  },
+
+  async createMyToken(name: string, expiryDays: number, scopes?: string[]): Promise<APIToken> {
+    const body: Record<string, unknown> = { name, expiry_days: expiryDays };
+    if (scopes && scopes.length > 0) body.scopes = scopes;
+    const res = await apiFetch(`${BASE_URL}/v1/me/tokens`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to create personal token' }));
+      throw new Error(err.error || 'Failed to create personal token');
+    }
+    return res.json();
+  },
+
+  async revokeMyToken(tokenHash: string): Promise<void> {
+    const res = await apiFetch(`${BASE_URL}/v1/me/tokens/${tokenHash}`, {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to revoke personal token' }));
+      throw new Error(err.error || 'Failed to revoke personal token');
     }
   },
 

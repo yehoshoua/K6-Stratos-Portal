@@ -268,10 +268,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings/defaults", s.authMiddleware(s.handleGetRunDefaults))
 	mux.HandleFunc("POST /api/settings/defaults", s.authMiddleware(s.editorOrAdmin(s.handleSaveRunDefaults)))
 
-	// API Tokens management routes
+	// API Tokens management routes (admin only)
 	mux.HandleFunc("GET /api/settings/tokens", s.authMiddleware(s.adminOnly(s.handleListAPITokens)))
 	mux.HandleFunc("POST /api/settings/tokens", s.authMiddleware(s.adminOnly(s.handleGenerateAPIToken)))
 	mux.HandleFunc("DELETE /api/settings/tokens/{hash}", s.authMiddleware(s.adminOnly(s.handleDeleteAPIToken)))
+
+	// Self-service personal token routes (all authenticated users, capped at 7 days)
+	mux.HandleFunc("GET /api/v1/me/tokens", s.authMiddleware(s.handleSelfServiceListTokens))
+	mux.HandleFunc("POST /api/v1/me/tokens", s.authMiddleware(s.handleSelfServiceGenerateToken))
+	mux.HandleFunc("DELETE /api/v1/me/tokens/{hash}", s.authMiddleware(s.handleSelfServiceDeleteToken))
 
 	// K6 CRD observability routes
 	mux.HandleFunc("GET /api/k8s/clusters/{id}/crds", s.authMiddleware(s.handleListCRDs))

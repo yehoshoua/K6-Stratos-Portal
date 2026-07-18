@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"k6-bedrock-dashboard/backend/internal/database"
 	"k6-bedrock-dashboard/backend/internal/guardian"
 )
 
@@ -116,7 +117,9 @@ func (s *Server) handleGenerateAPIToken(w http.ResponseWriter, r *http.Request) 
 		expiresAt = &exp
 	}
 
-	if err := s.db.SaveAPIToken(tokenHash, body.Name, body.Role, scopesStr, expiresAt); err != nil {
+	// Admin-managed tokens have owned_by="" to distinguish them from
+	// self-service tokens in the ListAPITokens admin view.
+	if err := s.db.SaveAPIToken(tokenHash, body.Name, body.Role, scopesStr, "", expiresAt); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to save API token: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
@@ -149,6 +152,158 @@ func (s *Server) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit("token.revoke", r.Header.Get("X-User-Name"), hash, nil)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"success":true}`))
+}
+
+// --- Self-service token handlers (POST/GET/DELETE /api/v1/me/tokens) ---
+// Available to all authenticated users, regardless of role. Tokens created
+// here are owner-scoped (owned_by = username) and capped at 7 days.
+
+func (s *Server) handleSelfServiceListTokens(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		http.Error(w, `{"error":"database not initialized"}`, http.StatusInternalServerError)
+		return
+	}
+	username := r.Header.Get("X-User-Name")
+	if username == "" {
+		http.Error(w, `{"error":"could not determine authenticated user"}`, http.StatusUnauthorized)
+		return
+	}
+	tokens, err := s.db.ListAPITokensByOwner(username)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to list tokens: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	if tokens == nil {
+		tokens = []*database.APIToken{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(tokens)
+}
+
+func (s *Server) handleSelfServiceGenerateToken(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		http.Error(w, `{"error":"database not initialized"}`, http.StatusInternalServerError)
+		return
+	}
+
+	username := r.Header.Get("X-User-Name")
+	userRole := r.Header.Get("X-User-Role")
+	if username == "" {
+		http.Error(w, `{"error":"could not determine authenticated user"}`, http.StatusUnauthorized)
+		return
+	}
+
+	var body struct {
+		Name       string   `json:"name"`
+		ExpiryDays int      `json:"expiry_days"`
+		Scopes     []string `json:"scopes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if body.Name == "" {
+		http.Error(w, `{"error":"name is required"}`, http.StatusBadRequest)
+		return
+	}
+	if body.ExpiryDays < 1 {
+		http.Error(w, `{"error":"expiry_days is required for personal tokens (1-7)"}`, http.StatusBadRequest)
+		return
+	}
+	if body.ExpiryDays > 7 {
+		http.Error(w, `{"error":"personal tokens cannot exceed 7 days"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Scopes are capped to the creator's role — no privilege escalation possible.
+	var scopesStr string
+	if len(body.Scopes) > 0 {
+		allowed := validScopesForRole(userRole)
+		unique := make(map[string]bool, len(body.Scopes))
+		for _, scope := range body.Scopes {
+			scope = strings.TrimSpace(scope)
+			if !allowed[scope] {
+				http.Error(w, `{"error":"scope is not permitted for your role"}`, http.StatusBadRequest)
+				return
+			}
+			unique[scope] = true
+		}
+		validated := make([]string, 0, len(unique))
+		for _, scope := range body.Scopes {
+			scope = strings.TrimSpace(scope)
+			if unique[scope] {
+				validated = append(validated, scope)
+				delete(unique, scope)
+			}
+		}
+		scopesStr = strings.Join(validated, ",")
+	} else {
+		scopesStr = scopesForRole(userRole)
+	}
+
+	randomBytes := make([]byte, 24)
+	if _, err := rand.Read(randomBytes); err != nil {
+		http.Error(w, `{"error":"failed to generate random bytes"}`, http.StatusInternalServerError)
+		return
+	}
+	rawToken := "stratum_tok_" + hex.EncodeToString(randomBytes)
+
+	hasher := sha256.New()
+	hasher.Write([]byte(rawToken))
+	tokenHash := hex.EncodeToString(hasher.Sum(nil))
+
+	exp := time.Now().AddDate(0, 0, body.ExpiryDays)
+	expiresAt := &exp
+
+	if err := s.db.SaveAPIToken(tokenHash, body.Name, userRole, scopesStr, username, expiresAt); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to save token: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	s.audit("token.self_service.create", username, body.Name, map[string]interface{}{
+		"role": userRole, "scopes": scopesStr, "expiry_days": body.ExpiryDays,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"token":      rawToken,
+		"token_hash": tokenHash,
+		"name":       body.Name,
+		"role":       userRole,
+		"scopes":     scopesStr,
+		"expires_at": expiresAt,
+	})
+}
+
+func (s *Server) handleSelfServiceDeleteToken(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		http.Error(w, `{"error":"database not initialized"}`, http.StatusInternalServerError)
+		return
+	}
+	username := r.Header.Get("X-User-Name")
+	if username == "" {
+		http.Error(w, `{"error":"could not determine authenticated user"}`, http.StatusUnauthorized)
+		return
+	}
+	hash := r.PathValue("hash")
+	if hash == "" {
+		http.Error(w, `{"error":"missing token hash"}`, http.StatusBadRequest)
+		return
+	}
+
+	deleted, err := s.db.DeleteAPITokenByHashAndOwner(hash, username)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to delete token: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	if !deleted {
+		http.Error(w, `{"error":"forbidden: not your token"}`, http.StatusForbidden)
+		return
+	}
+	s.audit("token.self_service.revoke", username, hash, nil)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"success":true}`))
