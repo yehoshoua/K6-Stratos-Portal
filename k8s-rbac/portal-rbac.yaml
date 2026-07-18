@@ -1,0 +1,67 @@
+# ==============================================================================
+# PORTAL BACKEND RBAC CONFIGURATION (k6-stratum-portal)
+# ==============================================================================
+# This configuration restricts the portal's cluster-wide privileges to read-only
+# discovery of namespaces and lease management. All resource creation/modification
+# privileges are scoped strictly to allowed target namespaces.
+
+# 1. Global Read-Only ClusterRole for Namespace Discovery & HA Coordination
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k6-stratum-portal-global-role
+rules:
+  # Allows the portal backend to discover and list namespaces to filter those
+  # labeled with 'k6s=enable' or 'k6s=enabled'
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Required for backend leader election when scaled to >1 replica
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+---
+# 2. Global ClusterRoleBinding linking the portal's ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k6-stratum-portal-global-binding
+subjects:
+  - kind: ServiceAccount
+    name: k6-stratum-portal-sa
+    namespace: k6-stratum-portal
+roleRef:
+  kind: ClusterRole
+  name: k6-stratum-portal-global-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# 3. Namespace-Specific Role (Deploy inside EACH target namespace labeled 'k6s=enable')
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: k6-portal-namespace-control
+  namespace: __TARGET_NAMESPACE__ # Replace with your target namespace (e.g. staging, testing)
+rules:
+  # Permissions to manage K6 Custom Resources (TestRun) locally
+  - apiGroups: ["k6.io"]
+    resources: ["k6s", "testruns"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  # Permissions to manage ConfigMaps containing test scripts locally
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+# 4. Namespace-Specific RoleBinding for the Portal Backend
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: k6-portal-namespace-control-binding
+  namespace: __TARGET_NAMESPACE__ # Replace with your target namespace (e.g. staging, testing)
+subjects:
+  - kind: ServiceAccount
+    name: k6-stratum-portal-sa
+    namespace: k6-stratum-portal # Portal SA namespace remains k6-stratum-portal
+roleRef:
+  kind: Role
+  name: k6-portal-namespace-control
+  apiGroup: rbac.authorization.k8s.io

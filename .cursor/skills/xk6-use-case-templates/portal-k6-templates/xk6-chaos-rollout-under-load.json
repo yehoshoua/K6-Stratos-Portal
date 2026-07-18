@@ -1,0 +1,15 @@
+{
+  "name": "xk6-chaos-rollout-under-load",
+  "template_type": "testrun",
+  "parallelism": 1,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "rollout-under-load.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "1",
+  "mem_limit": "1Gi",
+  "script_content": "// Disruption during a rollout window — coordinate with CI deploy.\n// Env: TARGET_NAMESPACE, TARGET_APP_LABEL, BASE_URL\nimport http from 'k6/http';\nimport { PodDisruptor } from 'k6/x/disruptor';\nimport { check, sleep } from 'k6';\n\nconst BASE_URL = __ENV.BASE_URL || 'https://test.k6.io';\nconst NS = __ENV.TARGET_NAMESPACE || 'default';\nconst APP = __ENV.TARGET_APP_LABEL || 'myapp';\n\nexport const options = {\n  vus: 15,\n  duration: '10m',\n};\n\nexport function setup() {\n  const disruptor = new PodDisruptor({ namespace: NS, labels: { app: APP } });\n  disruptor.injectNetworkLatency({ latency: '100ms', duration: '8m' });\n  return {};\n}\n\nexport default function () {\n  const res = http.get(BASE_URL);\n  check(res, { 'available during rollout': (r) => r.status < 500 });\n  sleep(0.3);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "chaos",
+  "description": "xk6 chaos template — rollout-under-load.js"
+}

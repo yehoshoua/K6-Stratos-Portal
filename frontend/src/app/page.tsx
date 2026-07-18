@@ -9,10 +9,14 @@ import {
   Plus, 
   Database,
   ArrowUpRight,
-  ShieldCheck
+  ShieldCheck,
+  ShieldAlert,
+  Layers,
+  Clock
 } from 'lucide-react';
-import { api, ClusterConfig } from '@/services/api';
+import { api, ClusterConfig, FleetSummary } from '@/services/api';
 import { usePreferences } from '@/components/PreferencesContext';
+import StatusBadge from '@/components/ui/StatusBadge';
 
 export default function DashboardPage() {
   const { t, lang } = usePreferences();
@@ -25,7 +29,21 @@ export default function DashboardPage() {
   const [activeTests, setActiveTests] = useState<{ active_count: number; first_active: string }>({ active_count: 0, first_active: 'None' });
   const [loadingActiveTests, setLoadingActiveTests] = useState(true);
   const [influxRunsCount, setInfluxRunsCount] = useState<string>('...');
-  const [influxStatus, setInfluxStatus] = useState<'online' | 'offline' | 'checking'>('checking');
+  const [influxStatus, setInfluxStatus] = useState<'online' | 'offline' | 'unconfigured' | 'checking'>('checking');
+  const [fleet, setFleet] = useState<FleetSummary | null>(null);
+  const [loadingFleet, setLoadingFleet] = useState(true);
+
+  const fetchFleet = async () => {
+    try {
+      setLoadingFleet(true);
+      const data = await api.getFleetSummary();
+      setFleet(data);
+    } catch (err) {
+      console.error('Failed to load fleet summary', err);
+    } finally {
+      setLoadingFleet(false);
+    }
+  };
 
   const fetchClusters = async () => {
     try {
@@ -66,6 +84,12 @@ export default function DashboardPage() {
   const fetchInfluxRuns = async () => {
     try {
       setInfluxStatus('checking');
+      const status = await api.getInfluxStatus();
+      if (!status.configured) {
+        setInfluxRunsCount(t('notAvailable'));
+        setInfluxStatus('unconfigured');
+        return;
+      }
       const runs = await api.getTestRuns();
       setInfluxRunsCount((runs || []).length.toString());
       setInfluxStatus('online');
@@ -85,6 +109,7 @@ export default function DashboardPage() {
     fetchOperatorStatus();
     fetchActiveTests();
     fetchInfluxRuns();
+    fetchFleet();
   }, []);
 
   return (
@@ -124,10 +149,12 @@ export default function DashboardPage() {
           { 
             title: t('influxTelemetries'), 
             value: influxStatus === 'offline' ? t('errorLabel') : influxRunsCount, 
-            sub: influxStatus === 'offline' ? t('connectionFailed') : t('recentRuns'), 
+            sub: influxStatus === 'unconfigured' ? t('notAvailable') : influxStatus === 'offline' ? t('connectionFailed') : t('recentRuns'), 
             icon: Database, 
             color: influxStatus === 'offline' 
               ? 'text-red-400 bg-red-500/10 border-red-500/20' 
+              : influxStatus === 'unconfigured'
+              ? 'text-slate-400 bg-slate-500/10 border-slate-500/20'
               : 'text-blue-400 bg-blue-500/10 border-blue-500/20' 
           }
         ].map((stat, i) => {
@@ -150,6 +177,60 @@ export default function DashboardPage() {
             </div>
           );
         })}
+      </div>
+
+      {/* Fleet Health — unified control-plane summary, parallelized on the backend across every registered cluster */}
+      <div className="bg-slate-900/30 border border-slate-800/80 rounded-2xl p-6 backdrop-blur-md">
+        <div className="flex items-center justify-between mb-5">
+          <h3 className="text-lg font-bold text-white flex items-center gap-2">
+            <Layers className="w-4.5 h-4.5 text-purple-400" />
+            {t('fleetHealthTitle')}
+          </h3>
+        </div>
+        {loadingFleet ? (
+          <div className="py-6 text-center text-slate-500 text-sm">{t('loading')}</div>
+        ) : fleet ? (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+            <div className="p-4 bg-slate-900/60 rounded-xl border border-slate-800 space-y-1">
+              <span className="text-[10px] text-slate-500 font-medium block">{t('fleetAccountsLabel')}</span>
+              <span className="text-xl font-bold text-white">{fleet.total_accounts}</span>
+            </div>
+            <div className="p-4 bg-slate-900/60 rounded-xl border border-slate-800 space-y-1">
+              <span className="text-[10px] text-slate-500 font-medium block">{t('fleetClustersOnline')}</span>
+              <span className="text-xl font-bold text-white">
+                {fleet.clusters_online}/{fleet.total_clusters}
+              </span>
+            </div>
+            <div className="p-4 bg-slate-900/60 rounded-xl border border-slate-800 space-y-1">
+              <span className="text-[10px] text-slate-500 font-medium block flex items-center gap-1">
+                <Clock className="w-3 h-3" /> {t('fleetActiveSchedules')}
+              </span>
+              <span className="text-xl font-bold text-white">{fleet.active_schedules}</span>
+            </div>
+            <div className="p-4 bg-slate-900/60 rounded-xl border border-slate-800 space-y-1">
+              <span className="text-[10px] text-slate-500 font-medium block">{t('activeTests')}</span>
+              <span className="text-xl font-bold text-white">{fleet.active_test_runs}</span>
+            </div>
+            <div className={`p-4 rounded-xl border space-y-1 ${fleet.open_guardian_blocks > 0 ? 'bg-red-500/5 border-red-500/20' : 'bg-slate-900/60 border-slate-800'}`}>
+              <span className="text-[10px] text-slate-500 font-medium flex items-center gap-1">
+                <ShieldAlert className="w-3 h-3" /> {t('fleetOpenBlocks')}
+              </span>
+              <span className={`text-xl font-bold ${fleet.open_guardian_blocks > 0 ? 'text-red-400' : 'text-white'}`}>{fleet.open_guardian_blocks}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="py-6 text-center text-slate-500 text-sm">{t('notAvailable')}</div>
+        )}
+
+        {fleet && fleet.clusters.length > 0 && (
+          <div className="mt-5 flex flex-wrap gap-2">
+            {fleet.clusters.map((c) => (
+              <StatusBadge key={c.cluster_id} tone={c.online ? 'success' : 'danger'} pulse={c.online}>
+                {c.cluster_name} {c.online ? `· ${c.active_runs}` : ''}
+              </StatusBadge>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Main Grid: Clusters & Details */}
@@ -240,16 +321,17 @@ export default function DashboardPage() {
               <div className="flex items-center space-x-3">
                 <span className={`w-2.5 h-2.5 rounded-full ${
                   influxStatus === 'online' ? 'bg-emerald-500' :
-                  influxStatus === 'checking' ? 'bg-slate-600 animate-pulse' : 'bg-red-500'
+                  influxStatus === 'checking' ? 'bg-slate-600 animate-pulse' :
+                  influxStatus === 'unconfigured' ? 'bg-slate-600' : 'bg-red-500'
                 }`} />
                 <span className="text-sm font-semibold text-slate-200">{t('influxdbService')}</span>
               </div>
               <span className={`text-xs px-2 py-0.5 rounded-md border ${
                 influxStatus === 'online' ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/25' :
-                influxStatus === 'checking' ? 'text-slate-500 bg-slate-500/10 border-slate-500/25' :
+                influxStatus === 'checking' || influxStatus === 'unconfigured' ? 'text-slate-500 bg-slate-500/10 border-slate-500/25' :
                 'text-red-400 bg-red-400/10 border-red-400/25'
               }`}>
-                {influxStatus === 'online' ? t('online') : influxStatus === 'checking' ? t('checking') : t('offline')}
+                {influxStatus === 'online' ? t('online') : influxStatus === 'checking' ? t('checking') : influxStatus === 'unconfigured' ? t('notAvailable') : t('offline')}
               </span>
             </div>
           </div>

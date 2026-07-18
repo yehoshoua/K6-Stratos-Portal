@@ -12,11 +12,16 @@ import {
   Calendar,
   X,
   Edit,
-  Compass
+  Compass,
+  FileDown,
+  Braces
 } from 'lucide-react';
 import { api, ClusterConfig, EcrCheck, K6CRD, K6Template, K8sPod, RunDefaults } from '@/services/api';
 import { defaultRunnerImage, resolveClusterImage, clusterImageContext, needsResolvedRunnerImage } from '@/utils/clusterImage';
 import { usePreferences } from '@/components/PreferencesContext';
+import PreflightPanel from '@/components/guardian/PreflightPanel';
+import K6StagesVisualEditor from '@/components/K6StagesVisualEditor';
+import { exportToCSV, exportToJSON } from '@/utils/export';
 
 function cleanK8sObject(obj: any): any {
   if (!obj || typeof obj !== 'object') return obj;
@@ -77,8 +82,8 @@ export default function CRDsPage() {
   const { t, lang } = usePreferences();
   const [clusters, setClusters] = useState<ClusterConfig[]>([]);
   const [selectedClusterId, setSelectedClusterId] = useState('');
-  const [namespace, setNamespace] = useState('default');
-  const [namespaces, setNamespaces] = useState<string[]>(['default']);
+  const [namespace, setNamespace] = useState('all');
+  const [namespaces, setNamespaces] = useState<string[]>([]);
   const [crds, setCrds] = useState<K6CRD[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedCrd, setSelectedCrd] = useState<K6CRD | null>(null);
@@ -204,6 +209,11 @@ export default function () {
   const [editingCrd, setEditingCrd] = useState<K6CRD | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
+  const [guardianBlock, setGuardianBlock] = useState<{
+    subjectRef: string;
+    payload: Record<string, unknown>;
+    retry: (validationRunId: string) => Promise<void>;
+  } | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [cronExpression, setCronExpression] = useState('');
@@ -238,6 +248,7 @@ export default function () {
   }, []);
 
   const isViewer = userRole === 'viewer';
+  const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
 
 
   const loadTemplates = async () => {
@@ -418,13 +429,13 @@ export default function () {
       if (!selectedClusterId) return;
       try {
         const list = await api.getNamespaces(selectedClusterId);
-        setNamespaces(list || ['default']);
+        setNamespaces(list || []);
         if (list && list.length > 0 && namespace !== 'all' && !list.includes(namespace)) {
           setNamespace(list[0]);
         }
       } catch (err) {
         console.error('Failed to load namespaces', err);
-        setNamespaces(['default']);
+        setNamespaces([]);
       }
     };
     fetchNamespaces();
@@ -775,7 +786,33 @@ export default function () {
       setEditingCrd(null);
       fetchCRDs();
     } catch (err: any) {
-      setCreateError(err.message || t('deployCrdFailed'));
+      const message = err.message || t('deployCrdFailed');
+      // The backend runs an inline Guardian pre-flight check on every
+      // launch even if the frontend never opened the panel proactively
+      // (see guardianGate in the Go backend). When it blocks a launch,
+      // show the live multi-agent breakdown + admin override flow instead
+      // of a plain error string.
+      if (!scheduleEnabled && typeof message === 'string' && message.toLowerCase().includes('guardian')) {
+        setGuardianBlock({
+          subjectRef: newRun.name,
+          payload: {
+            scriptContent: specBody.scriptContent,
+            cpuLimit: newRun.cpuLimit,
+            memLimit: newRun.memLimit,
+            parallelism: Number(newRun.parallelism),
+            runnerImage: newRun.useCustomImage ? newRun.customImage : undefined,
+          },
+          retry: async (validationRunId: string) => {
+            await api.createCRD(selectedClusterId, targetNs, { ...specBody, validation_run_id: validationRunId });
+            setIsModalOpen(false);
+            setNewRun(buildDefaultRunConfig());
+            setEditingCrd(null);
+            fetchCRDs();
+          },
+        });
+      } else {
+        setCreateError(message);
+      }
     } finally {
       setCreating(false);
     }
@@ -868,12 +905,43 @@ export default function () {
               <Layers className="w-5 h-5 text-purple-400" />
               <span>{t('crdList')}</span>
             </h3>
-            <button
-              onClick={fetchCRDs}
-              className="p-2 border border-slate-850 hover:bg-slate-800 text-slate-400 hover:text-slate-100 rounded-xl transition cursor-pointer"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            </button>
+            <div className="flex items-center gap-2">
+              {crds.length > 0 && (
+                <>
+                  <button
+                    onClick={() =>
+                      exportToCSV(
+                        'k6-testruns',
+                        crds.map((c) => ({
+                          name: c.metadata.name,
+                          namespace: c.metadata.namespace,
+                          created: c.metadata.creationTimestamp,
+                          stage: c.status?.stage || '',
+                          active: c.status?.active ?? '',
+                        })),
+                      )
+                    }
+                    title={t('exportCsv')}
+                    className="p-2 border border-slate-850 hover:bg-slate-800 text-slate-400 hover:text-slate-100 rounded-xl transition cursor-pointer"
+                  >
+                    <FileDown className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => exportToJSON('k6-testruns', crds)}
+                    title={t('exportJson')}
+                    className="p-2 border border-slate-850 hover:bg-slate-800 text-slate-400 hover:text-slate-100 rounded-xl transition cursor-pointer"
+                  >
+                    <Braces className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+              <button
+                onClick={fetchCRDs}
+                className="p-2 border border-slate-850 hover:bg-slate-800 text-slate-400 hover:text-slate-100 rounded-xl transition cursor-pointer"
+              >
+                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
           </div>
 
           {loading && crds.length === 0 ? (
@@ -1537,6 +1605,12 @@ export default function () {
                       placeholder="import http from 'k6/http'; ..."
                     />
                   </div>
+                  {selectedTemplate?.name === 'xk6-http-load' && (
+                    <K6StagesVisualEditor
+                      script={newRun.scriptContent}
+                      onChange={(scriptContent) => setNewRun((current) => ({ ...current, scriptContent }))}
+                    />
+                  )}
                 </>
               ) : (
                 <div className="grid grid-cols-2 gap-4">
@@ -1999,6 +2073,28 @@ export default function () {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Guardian multi-agent pre-flight review, shown when a launch is blocked */}
+      {guardianBlock && (
+        <PreflightPanel
+          open={!!guardianBlock}
+          onClose={() => setGuardianBlock(null)}
+          subjectType="test_launch"
+          subjectRef={guardianBlock.subjectRef}
+          clusterId={selectedClusterId}
+          namespace={namespace === 'all' ? (namespaces[0] || 'default') : namespace}
+          payload={guardianBlock.payload}
+          onProceed={async (validationRunId) => {
+            const retry = guardianBlock.retry;
+            setGuardianBlock(null);
+            try {
+              await retry(validationRunId);
+            } catch (err: any) {
+              setCreateError(err.message || t('deployCrdFailed'));
+            }
+          }}
+        />
       )}
     </div>
   );

@@ -1,0 +1,15 @@
+{
+  "name": "xk6-aws-kms-encrypt",
+  "template_type": "testrun",
+  "parallelism": 2,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "kms-encrypt.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "250m",
+  "mem_limit": "256Mi",
+  "script_content": "// KMS encrypt under load.\n// Env: AWS_REGION, KMS_KEY_ID\nimport { AWSConfig, KMSClient } from '/jslibs/aws/kms.js';\nimport { check, sleep } from 'k6';\nimport { randomString } from 'https://jslib.k6.io/k6-utils/1.4.0/index.js';\n\nconst aws = new AWSConfig({ region: __ENV.AWS_REGION || 'us-east-1' });\nconst kms = new KMSClient(aws);\nconst keyId = __ENV.KMS_KEY_ID || 'alias/my-key';\n\nexport const options = { vus: 3, duration: '1m' };\n\nexport default function () {\n  const plaintext = randomString(32);\n  const res = kms.encrypt(keyId, plaintext);\n  check(res, { 'encrypted': (r) => !r.error && r.ciphertextBlob });\n  sleep(0.5);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "aws",
+  "description": "xk6 aws template — kms-encrypt.js"
+}

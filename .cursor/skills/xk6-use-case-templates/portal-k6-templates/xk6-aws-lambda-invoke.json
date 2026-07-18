@@ -1,0 +1,15 @@
+{
+  "name": "xk6-aws-lambda-invoke",
+  "template_type": "testrun",
+  "parallelism": 2,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "lambda-invoke.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// Lambda synchronous invoke under load.\n// Env: AWS_REGION, LAMBDA_FUNCTION_NAME\nimport { AWSConfig, LambdaClient } from '/jslibs/aws/lambda.js';\nimport { check, sleep } from 'k6';\n\nconst aws = new AWSConfig({ region: __ENV.AWS_REGION || 'us-east-1' });\nconst lambda = new LambdaClient(aws);\nconst fn = __ENV.LAMBDA_FUNCTION_NAME || 'my-function';\n\nexport const options = { vus: 3, duration: '2m' };\n\nexport default function () {\n  const payload = JSON.stringify({ action: 'ping', vu: __VU });\n  const res = lambda.invoke(fn, payload);\n  check(res, { 'invoke ok': (r) => !r.error && r.statusCode === 200 });\n  sleep(1);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "aws",
+  "description": "xk6 aws template — lambda-invoke.js"
+}

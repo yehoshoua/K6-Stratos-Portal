@@ -1,0 +1,15 @@
+{
+  "name": "xk6-sql-write-under-load",
+  "template_type": "testrun",
+  "parallelism": 3,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "write-under-load.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// Postgres write under load — requires writable table `k6_load_test`.\n// Env: PG_DSN\n// Setup: CREATE TABLE k6_load_test (id serial PRIMARY KEY, vu int, iter int, ts timestamptz DEFAULT now());\nimport sql from 'k6/x/sql';\nimport driver from 'k6/x/sql/driver/postgres';\nimport { check, sleep } from 'k6';\n\nconst db = sql.open(driver, __ENV.PG_DSN || 'postgres://localhost:5432/k6?sslmode=disable');\n\nexport const options = {\n  vus: 5,\n  duration: '3m',\n};\n\nexport function teardown() {\n  db.close();\n}\n\nexport default function () {\n  sql.exec(db, 'INSERT INTO k6_load_test (vu, iter) VALUES ($1, $2)', __VU, __ITER);\n  const rows = sql.query(db, 'SELECT count(*)::int AS c FROM k6_load_test');\n  check(rows, { 'insert visible': (r) => r[0].c > 0 });\n  sleep(1);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "sql",
+  "description": "xk6 sql template — write-under-load.js"
+}

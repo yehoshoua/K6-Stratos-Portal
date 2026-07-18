@@ -1,0 +1,15 @@
+{
+  "name": "xk6-sql-read-under-load",
+  "template_type": "testrun",
+  "parallelism": 5,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "read-under-load.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// Postgres read under load.\n// Env: PG_DSN\nimport sql from 'k6/x/sql';\nimport driver from 'k6/x/sql/driver/postgres';\nimport { check, sleep } from 'k6';\n\nconst db = sql.open(driver, __ENV.PG_DSN || 'postgres://localhost:5432/k6?sslmode=disable');\n\nexport const options = {\n  vus: 10,\n  duration: '3m',\n  thresholds: { checks: ['rate>0.99'] },\n};\n\nexport function teardown() {\n  db.close();\n}\n\nexport default function () {\n  const rows = sql.query(db, 'SELECT 1 AS ok');\n  check(rows, { 'row returned': (r) => r.length > 0 && r[0].ok === 1 });\n  sleep(0.5);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "sql",
+  "description": "xk6 sql template — read-under-load.js"
+}

@@ -227,8 +227,7 @@ export default function MetricsPage() {
     const run = runs.find(r => getRunKey(r) === selectedRunKey);
     if (!run) return;
 
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : '';
-    const url = `/api/influx/runs/${run.test_run_id}/stream?metric=${metric}&cluster=${encodeURIComponent(run.cluster || '')}&namespace=${encodeURIComponent(run.namespace || '')}&token=${encodeURIComponent(token || '')}`;
+    const url = `/api/influx/runs/${run.test_run_id}/stream?metric=${metric}&cluster=${encodeURIComponent(run.cluster || '')}&namespace=${encodeURIComponent(run.namespace || '')}`;
 
     setLoadingMetrics(true);
     const eventSource = new EventSource(url);

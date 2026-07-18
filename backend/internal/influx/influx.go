@@ -47,6 +47,13 @@ func NewMetricsService(version, serverURL, token, org, bucket, username, passwor
 	}
 }
 
+// Configured reports whether an InfluxDB endpoint has been configured.
+// Query methods intentionally return empty data without an endpoint, so UI
+// status checks need this explicit signal.
+func (s *MetricsService) Configured() bool {
+	return s != nil && s.url != ""
+}
+
 // Close closes the underlying InfluxDB client connection
 func (s *MetricsService) Close() {
 	if s.client != nil {

@@ -1,0 +1,15 @@
+{
+  "name": "post-deploy-smoke",
+  "template_type": "job",
+  "scriptName": "k6-scripts",
+  "scriptFile": "smoke.js",
+  "cpuLimit": "250m",
+  "memLimit": "256Mi",
+  "useArguments": true,
+  "argumentsText": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "imageUrl": "107435627496.dkr.ecr.us-east-1.amazonaws.com/rem-apps/xk6:v1.1",
+  "env": {
+    "BASE_URL": "https://my-service.default.svc.cluster.local",
+    "HEALTH_PATH": "/healthz"
+  }
+}

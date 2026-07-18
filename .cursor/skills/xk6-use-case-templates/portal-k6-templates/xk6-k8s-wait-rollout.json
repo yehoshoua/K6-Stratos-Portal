@@ -1,0 +1,15 @@
+{
+  "name": "xk6-k8s-wait-rollout",
+  "template_type": "job",
+  "parallelism": 0,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "wait-rollout.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "250m",
+  "mem_limit": "256Mi",
+  "script_content": "// Wait until deployment rollout is complete (pre-smoke gate).\n// Env: TARGET_NAMESPACE, DEPLOYMENT_NAME, ROLLOUT_TIMEOUT\nimport { Kubernetes } from 'k6/x/kubernetes';\nimport { check, sleep } from 'k6';\n\nconst NS = __ENV.TARGET_NAMESPACE || 'default';\nconst DEPLOY = __ENV.DEPLOYMENT_NAME || 'myapp';\nconst TIMEOUT = __ENV.ROLLOUT_TIMEOUT || '5m';\n\nconst k8s = new Kubernetes();\n\nexport const options = {\n  vus: 1,\n  iterations: 1,\n};\n\nexport default function () {\n  const ok = k8s.deployments.waitForRollout(NS, DEPLOY, TIMEOUT);\n  check(ok, { 'rollout complete': (v) => v === true });\n  sleep(1);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "k8s",
+  "description": "xk6 k8s template — wait-rollout.js"
+}

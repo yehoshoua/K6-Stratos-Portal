@@ -1,0 +1,15 @@
+{
+  "name": "xk6-chaos-pod-kill",
+  "template_type": "testrun",
+  "parallelism": 1,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "pod-kill.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// Disruptor: terminate a target pod (chaos — non-prod only).\n// Env: TARGET_NAMESPACE, TARGET_APP_LABEL\nimport { PodDisruptor } from 'k6/x/disruptor';\nimport { sleep } from 'k6';\n\nconst NS = __ENV.TARGET_NAMESPACE || 'default';\nconst APP = __ENV.TARGET_APP_LABEL || 'myapp';\n\nexport const options = {\n  vus: 1,\n  iterations: 1,\n};\n\nexport default function () {\n  const disruptor = new PodDisruptor({\n    namespace: NS,\n    labels: { app: APP },\n  });\n\n  disruptor.terminatePods();\n  sleep(30);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "chaos",
+  "description": "xk6 chaos template — pod-kill.js"
+}

@@ -11,7 +11,7 @@ Stack: **Next.js 16** frontend, **Go** REST backend, **Kubernetes** + **InfluxDB
 
 | Area | Rule file | When it applies |
 |---|---|---|
-| Frontend UI text | `i18n-multilingual.mdc` | All user-visible strings in en/fr/he/zh |
+| Frontend UI text | `i18n-multilingual.mdc` | All user-visible strings in en/fr/es/de/he/zh |
 | Backend HA | `backend-ha-leader-election.mdc` | DB workers, scheduler, multi-replica deploy |
 
 ## Skills

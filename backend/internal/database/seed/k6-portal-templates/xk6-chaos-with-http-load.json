@@ -1,0 +1,15 @@
+{
+  "name": "xk6-chaos-with-http-load",
+  "template_type": "testrun",
+  "parallelism": 5,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "chaos-with-http-load.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "1",
+  "mem_limit": "1Gi",
+  "script_content": "// Phased: HTTP load while injecting network latency mid-test.\n// Env: BASE_URL, TARGET_NAMESPACE, TARGET_APP_LABEL\nimport http from 'k6/http';\nimport { PodDisruptor } from 'k6/x/disruptor';\nimport { check, sleep } from 'k6';\n\nconst BASE_URL = __ENV.BASE_URL || 'https://test.k6.io';\nconst NS = __ENV.TARGET_NAMESPACE || 'default';\nconst APP = __ENV.TARGET_APP_LABEL || 'myapp';\n\nexport const options = {\n  scenarios: {\n    load: {\n      executor: 'constant-vus',\n      vus: 20,\n      duration: '5m',\n      exec: 'loadTest',\n    },\n    chaos: {\n      executor: 'shared-iterations',\n      vus: 1,\n      iterations: 1,\n      startTime: '2m',\n      exec: 'chaosTest',\n    },\n  },\n  thresholds: {\n    http_req_failed: ['rate<0.1'],\n    http_req_duration: ['p(95)<3000'],\n  },\n};\n\nexport function chaosTest() {\n  const disruptor = new PodDisruptor({ namespace: NS, labels: { app: APP } });\n  disruptor.injectNetworkLatency({ latency: '300ms', duration: '90s' });\n  sleep(100);\n}\n\nexport function loadTest() {\n  const res = http.get(BASE_URL);\n  check(res, { 'status 2xx': (r) => r.status >= 200 && r.status < 500 });\n  sleep(0.5);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "chaos",
+  "description": "xk6 chaos template — chaos-with-http-load.js"
+}

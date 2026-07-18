@@ -1,22 +1,22 @@
 ---
-description: Require all user-visible text in en, fr, he, zh
+description: Require all user-visible text in en, fr, es, de, he, zh
 globs: frontend/**/*.{tsx,ts}
 alwaysApply: false
 ---
 
-# Multilingual UI (en / fr / he / zh)
+# Multilingual UI (en / fr / es / de / he / zh)
 
-All user-visible text must be available in all four supported locales.
+All user-visible text must be available in all six supported locales.
 
 ## Supported locales
 
-Use the existing `Language` type: `en`, `fr`, `he`, `zh`. Do not add other languages without updating the type and all dictionaries.
+Use the existing `Language` type: `en`, `fr`, `es`, `de`, `he`, `zh`. Do not add other languages without updating the type and all dictionaries. When adding a new locale to the type/dictionaries, also add it to the language-switcher button lists in `Sidebar.tsx` and `app/login/page.tsx` — the dictionary alone does not make a locale reachable from the UI.
 
 ## Translation source
 
 - Import `usePreferences()` and call `t('key')` for every user-visible string: labels, buttons, toasts, errors, placeholders, tooltips, page titles, and metadata.
-- Dictionary lives in `frontend/src/components/PreferencesContext.tsx`.
-- When adding a key, add it to **all four** locale objects (`en`, `fr`, `he`, `zh`) in the same edit.
+- Dictionary lives in `frontend/src/components/PreferencesContext.tsx` (plus `frontend/src/i18n/strings.ts` for supplemental keys spread into each locale block).
+- When adding a key, add it to **all six** locale objects (`en`, `fr`, `es`, `de`, `he`, `zh`) in the same edit.
 
 ## Forbidden patterns
 
@@ -64,5 +64,5 @@ Map API error codes or known messages client-side via `t()`. Do not display raw 
 Before finishing frontend UI work:
 
 1. Grep changed files for quoted strings outside `t()` calls.
-2. Verify new keys exist in all four locale blocks.
+2. Verify new keys exist in all six locale blocks.
 3. Confirm Hebrew pages set `dir` correctly.

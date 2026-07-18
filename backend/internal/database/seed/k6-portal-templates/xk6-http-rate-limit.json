@@ -1,0 +1,15 @@
+{
+  "name": "xk6-http-rate-limit",
+  "template_type": "testrun",
+  "parallelism": 10,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "rate-limit.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// Rate limit — high arrival rate, expect 429 after threshold.\n// Env: BASE_URL, API_PATH, EXPECT_RATE_LIMIT (true|false)\nimport http from 'k6/http';\nimport { check, sleep } from 'k6';\n\nconst BASE_URL = __ENV.BASE_URL || 'https://test.k6.io';\nconst API_PATH = __ENV.API_PATH || '/api/limited';\nconst EXPECT_429 = (__ENV.EXPECT_RATE_LIMIT || 'true') === 'true';\n\nexport const options = {\n  scenarios: {\n    rate_limit: {\n      executor: 'constant-arrival-rate',\n      rate: 100,\n      timeUnit: '1s',\n      duration: '1m',\n      preAllocatedVUs: 50,\n      maxVUs: 200,\n    },\n  },\n};\n\nexport default function () {\n  const res = http.get(`${BASE_URL}${API_PATH}`);\n  if (EXPECT_429) {\n    check(res, {\n      'eventually rate limited': (r) => r.status === 200 || r.status === 429,\n      'got 429 at least sometimes': (r) => r.status === 429,\n    });\n  } else {\n    check(res, { 'status 2xx': (r) => r.status >= 200 && r.status < 300 });\n  }\n  sleep(0.05);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "http",
+  "description": "xk6 http template — rate-limit.js"
+}

@@ -1,9 +1,7 @@
 package database
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +11,7 @@ import (
 
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type DB struct {
@@ -32,6 +31,7 @@ type ClusterConfig struct {
 	Region              string    `json:"region,omitempty"`
 	Namespaces          string    `json:"namespaces,omitempty"`     // Comma-separated list of allowed namespaces
 	AWSAccountID        string    `json:"aws_account_id,omitempty"` // AWS Account ID for ECR image resolution
+	Environment         string    `json:"environment,omitempty"`    // dev | stage | prod | sandbox — drives Guardian production safety checks
 	K6OperatorInstalled bool      `json:"k6_operator_installed"`
 }
 
@@ -134,13 +134,37 @@ func InitDB(driverName, dsn string) (*DB, error) {
 	}
 
 	db := &DB{conn: conn, driver: driverName}
+	db.configurePool()
 
 	if err := db.createTables(); err != nil {
 		conn.Close()
 		return nil, err
 	}
 
+	if err := db.createGuardianTables(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
 	return db, nil
+}
+
+// configurePool tunes connection pool limits per the HA guidance in
+// .cursor/rules/backend-ha-leader-election.mdc: Postgres gets a real pool
+// for multi-replica deployments, SQLite is capped to a single writer
+// connection since the driver serializes writes and a wider pool just
+// produces "database is locked" errors under load.
+func (db *DB) configurePool() {
+	if db.driver == "postgres" {
+		db.conn.SetMaxOpenConns(25)
+		db.conn.SetMaxIdleConns(10)
+		db.conn.SetConnMaxLifetime(30 * time.Minute)
+		db.conn.SetConnMaxIdleTime(5 * time.Minute)
+		return
+	}
+	db.conn.SetMaxOpenConns(1)
+	db.conn.SetMaxIdleConns(1)
+	db.conn.SetConnMaxLifetime(0)
 }
 
 func (db *DB) rebind(query string) string {
@@ -162,6 +186,12 @@ func (db *DB) rebind(query string) string {
 
 func (db *DB) Close() error {
 	return db.conn.Close()
+}
+
+// Ping is used by the /readyz health probe to confirm the DB connection
+// is actually usable, not just that the process is alive.
+func (db *DB) Ping() error {
+	return db.conn.Ping()
 }
 
 func (db *DB) createTables() error {
@@ -249,6 +279,7 @@ func (db *DB) createTables() error {
 		token_hash TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
 		role TEXT NOT NULL,
+		scopes TEXT DEFAULT '',
 		created_at TIMESTAMP NOT NULL,
 		expires_at TIMESTAMP
 	);`
@@ -335,17 +366,19 @@ func (db *DB) createTables() error {
 		return fmt.Errorf("failed to create test_alerts table: %w", err)
 	}
 
-	// Seed default administrator user if users table is empty
+	// Seed default administrator user if users table is empty. Hashed
+	// with bcrypt like every other password from day one — there is no
+	// legacy SHA-256 seed to migrate here.
 	var count int
 	countQuery := db.rebind("SELECT COUNT(*) FROM users")
 	if err := db.conn.QueryRow(countQuery).Scan(&count); err == nil && count == 0 {
-		defaultSalt := "default_admin_salt_12345"
-		hasher := sha256.New()
-		hasher.Write([]byte("admin" + defaultSalt))
-		defaultHash := hex.EncodeToString(hasher.Sum(nil))
+		defaultHash, hashErr := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+		if hashErr != nil {
+			return fmt.Errorf("failed to hash default administrator password: %w", hashErr)
+		}
 
 		seedQuery := db.rebind("INSERT INTO users (username, password_hash, salt, role, created_at) VALUES (?, ?, ?, ?, ?)")
-		_, seedErr := db.conn.Exec(seedQuery, "admin", defaultHash, defaultSalt, "administrator", time.Now())
+		_, seedErr := db.conn.Exec(seedQuery, "admin", string(defaultHash), "", "administrator", time.Now())
 		if seedErr != nil {
 			return fmt.Errorf("failed to seed default administrator user: %w", seedErr)
 		}
@@ -406,6 +439,8 @@ func (db *DB) createTables() error {
 		}
 	}
 
+	db.ensureColumn("clusters", "environment", "TEXT DEFAULT ''")
+
 	db.ensureSlaThresholdsColumn()
 
 	db.ensureRunnerImageColumn()
@@ -455,6 +490,33 @@ func (db *DB) createTables() error {
 		}
 	}
 
+	// Migration: Add scopes column to api_tokens table if it does not exist
+	var hasScopes bool
+	if db.driver == "postgres" {
+		_ = db.conn.QueryRow("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='api_tokens' AND column_name='scopes');").Scan(&hasScopes)
+	} else {
+		tokRows, err := db.conn.Query("PRAGMA table_info(api_tokens);")
+		if err == nil {
+			for tokRows.Next() {
+				var cid int
+				var name, ctype string
+				var notnull, pk int
+				var dfltVal sql.NullString
+				if err := tokRows.Scan(&cid, &name, &ctype, &notnull, &dfltVal, &pk); err == nil {
+					if name == "scopes" {
+						hasScopes = true
+					}
+				}
+			}
+			tokRows.Close()
+		}
+	}
+	if !hasScopes {
+		if _, err := db.conn.Exec("ALTER TABLE api_tokens ADD COLUMN scopes TEXT DEFAULT '';"); err != nil {
+			log.Printf("Warning: failed to migrate scopes column on api_tokens: %v", err)
+		}
+	}
+
 	return nil
 }
 
@@ -462,8 +524,8 @@ func (db *DB) SaveCluster(c *ClusterConfig) error {
 	var query string
 	if db.driver == "postgres" {
 		query = `
-		INSERT INTO clusters (id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, aws_account_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO clusters (id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, aws_account_id, environment)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			api_server_url = EXCLUDED.api_server_url,
@@ -474,19 +536,20 @@ func (db *DB) SaveCluster(c *ClusterConfig) error {
 			kubernetes_version = EXCLUDED.kubernetes_version,
 			region = EXCLUDED.region,
 			namespaces = EXCLUDED.namespaces,
-			aws_account_id = EXCLUDED.aws_account_id;`
+			aws_account_id = EXCLUDED.aws_account_id,
+			environment = EXCLUDED.environment;`
 	} else {
 		query = `
-		INSERT OR REPLACE INTO clusters (id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, aws_account_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+		INSERT OR REPLACE INTO clusters (id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, aws_account_id, environment)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	}
 
-	_, err := db.conn.Exec(query, c.ID, c.Name, c.APIServerURL, c.AuthType, c.EncryptedData, c.CACertBase64, c.CreatedAt, c.KubernetesVersion, c.Region, c.Namespaces, c.AWSAccountID)
+	_, err := db.conn.Exec(query, c.ID, c.Name, c.APIServerURL, c.AuthType, c.EncryptedData, c.CACertBase64, c.CreatedAt, c.KubernetesVersion, c.Region, c.Namespaces, c.AWSAccountID, c.Environment)
 	return err
 }
 
 func (db *DB) GetClusters() ([]*ClusterConfig, error) {
-	query := db.rebind(`SELECT id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, COALESCE(aws_account_id,'') FROM clusters;`)
+	query := db.rebind(`SELECT id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, COALESCE(aws_account_id,''), COALESCE(environment,'') FROM clusters;`)
 	rows, err := db.conn.Query(query)
 	if err != nil {
 		return nil, err
@@ -496,7 +559,7 @@ func (db *DB) GetClusters() ([]*ClusterConfig, error) {
 	list := make([]*ClusterConfig, 0)
 	for rows.Next() {
 		var c ClusterConfig
-		err := rows.Scan(&c.ID, &c.Name, &c.APIServerURL, &c.AuthType, &c.EncryptedData, &c.CACertBase64, &c.CreatedAt, &c.KubernetesVersion, &c.Region, &c.Namespaces, &c.AWSAccountID)
+		err := rows.Scan(&c.ID, &c.Name, &c.APIServerURL, &c.AuthType, &c.EncryptedData, &c.CACertBase64, &c.CreatedAt, &c.KubernetesVersion, &c.Region, &c.Namespaces, &c.AWSAccountID, &c.Environment)
 		if err != nil {
 			return nil, err
 		}
@@ -1042,18 +1105,19 @@ type APIToken struct {
 	TokenHash string     `json:"token_hash"`
 	Name      string     `json:"name"`
 	Role      string     `json:"role"`
+	Scopes    string     `json:"scopes"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at"`
 }
 
-func (db *DB) SaveAPIToken(tokenHash string, name string, role string, expiresAt *time.Time) error {
-	query := db.rebind(`INSERT INTO api_tokens (token_hash, name, role, created_at, expires_at) VALUES (?, ?, ?, ?, ?);`)
-	_, err := db.conn.Exec(query, tokenHash, name, role, time.Now(), expiresAt)
+func (db *DB) SaveAPIToken(tokenHash string, name string, role string, scopes string, expiresAt *time.Time) error {
+	query := db.rebind(`INSERT INTO api_tokens (token_hash, name, role, scopes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?);`)
+	_, err := db.conn.Exec(query, tokenHash, name, role, scopes, time.Now(), expiresAt)
 	return err
 }
 
 func (db *DB) ListAPITokens() ([]*APIToken, error) {
-	query := db.rebind(`SELECT token_hash, name, role, created_at, expires_at FROM api_tokens ORDER BY created_at DESC;`)
+	query := db.rebind(`SELECT token_hash, name, role, scopes, created_at, expires_at FROM api_tokens ORDER BY created_at DESC;`)
 	rows, err := db.conn.Query(query)
 	if err != nil {
 		return nil, err
@@ -1063,7 +1127,7 @@ func (db *DB) ListAPITokens() ([]*APIToken, error) {
 	var tokens []*APIToken
 	for rows.Next() {
 		var t APIToken
-		err := rows.Scan(&t.TokenHash, &t.Name, &t.Role, &t.CreatedAt, &t.ExpiresAt)
+		err := rows.Scan(&t.TokenHash, &t.Name, &t.Role, &t.Scopes, &t.CreatedAt, &t.ExpiresAt)
 		if err != nil {
 			return nil, err
 		}
@@ -1079,9 +1143,9 @@ func (db *DB) DeleteAPIToken(tokenHash string) error {
 }
 
 func (db *DB) GetAPITokenByHash(tokenHash string) (*APIToken, error) {
-	query := db.rebind(`SELECT token_hash, name, role, created_at, expires_at FROM api_tokens WHERE token_hash = ? LIMIT 1;`)
+	query := db.rebind(`SELECT token_hash, name, role, scopes, created_at, expires_at FROM api_tokens WHERE token_hash = ? LIMIT 1;`)
 	var t APIToken
-	err := db.conn.QueryRow(query, tokenHash).Scan(&t.TokenHash, &t.Name, &t.Role, &t.CreatedAt, &t.ExpiresAt)
+	err := db.conn.QueryRow(query, tokenHash).Scan(&t.TokenHash, &t.Name, &t.Role, &t.Scopes, &t.CreatedAt, &t.ExpiresAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil

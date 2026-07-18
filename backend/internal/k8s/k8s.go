@@ -4,10 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	yaml "gopkg.in/yaml.v3"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -122,6 +128,8 @@ func NewClientFromLocalKubeconfig(contextName string) (*EKSClusterClient, error)
 		return nil, fmt.Errorf("failed to load kubeconfig client config: %w", err)
 	}
 
+	config.Timeout = 5 * time.Second
+
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create standard clientset: %w", err)
@@ -148,6 +156,8 @@ func NewClientFromKubeconfig(kubeconfigPEM []byte) (*EKSClusterClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse kubeconfig: %w", err)
 	}
+
+	config.Timeout = 5 * time.Second
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
@@ -178,6 +188,7 @@ func NewClientFromToken(apiServerURL string, token string, caCertBase64 string) 
 		TLSClientConfig: rest.TLSClientConfig{
 			CAData: caCert,
 		},
+		Timeout: 5 * time.Second,
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
@@ -203,6 +214,8 @@ func NewClientFromInCluster() (*EKSClusterClient, error) {
 		return nil, fmt.Errorf("failed to load in-cluster config: %w", err)
 	}
 
+	config.Timeout = 5 * time.Second
+
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create standard clientset: %w", err)
@@ -218,7 +231,6 @@ func NewClientFromInCluster() (*EKSClusterClient, error) {
 		DynamicClient: dynClient,
 	}, nil
 }
-
 
 // GetK6GVR returns the schema GVR for the legacy K6 CRD (k6s.k6.io)
 func GetK6GVR() schema.GroupVersionResource {
@@ -251,7 +263,7 @@ func (c *EKSClusterClient) ListK6CustomResources(ctx context.Context, namespace 
 	if apierrors.IsNotFound(err) ||
 		strings.Contains(errStr, "could not find the requested resource") ||
 		strings.Contains(errStr, "no matches for kind") {
-		
+
 		legacyList, legacyErr := c.DynamicClient.Resource(GetK6GVR()).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if legacyErr == nil {
 			return legacyList.Items, nil
@@ -282,7 +294,7 @@ func (c *EKSClusterClient) GetK6CustomResource(ctx context.Context, namespace, n
 	if apierrors.IsNotFound(err) ||
 		strings.Contains(errStr, "could not find the requested resource") ||
 		strings.Contains(errStr, "no matches for kind") {
-		
+
 		legacyItem, legacyErr := c.DynamicClient.Resource(GetK6GVR()).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 		if legacyErr != nil {
 			return nil, fmt.Errorf("failed to get legacy K6 Custom Resource %s: %w", name, legacyErr)
@@ -307,7 +319,7 @@ func (c *EKSClusterClient) CreateK6CustomResource(ctx context.Context, namespace
 	if apierrors.IsNotFound(err) ||
 		strings.Contains(errStr, "could not find the requested resource") ||
 		strings.Contains(errStr, "no matches for kind") {
-		
+
 		obj.SetKind("K6")
 		legacyCreated, legacyErr := c.DynamicClient.Resource(GetK6GVR()).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
 		if legacyErr != nil {
@@ -332,7 +344,7 @@ func (c *EKSClusterClient) DeleteK6CustomResource(ctx context.Context, namespace
 	if apierrors.IsNotFound(err) ||
 		strings.Contains(errStr, "could not find the requested resource") ||
 		strings.Contains(errStr, "no matches for kind") {
-		
+
 		legacyErr := c.DynamicClient.Resource(GetK6GVR()).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 		if legacyErr != nil {
 			return fmt.Errorf("failed to delete legacy K6 Custom Resource %s: %w", name, legacyErr)
@@ -385,4 +397,89 @@ func cleanKubeconfig(data []byte) ([]byte, error) {
 		return data, err
 	}
 	return cleaned, nil
+}
+
+// GenerateEKSToken generates a temporary auth token for Amazon EKS using AWS STS AssumeRole
+func GenerateEKSToken(ctx context.Context, clusterName string, roleARN string) (string, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	if roleARN != "" {
+		stsClient := sts.NewFromConfig(cfg)
+		assumed, err := stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
+			RoleArn:         aws.String(roleARN),
+			RoleSessionName: aws.String("stratos-eks-operator"),
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to assume EKS role: %w", err)
+		}
+
+		creds := credentials.NewStaticCredentialsProvider(
+			*assumed.Credentials.AccessKeyId,
+			*assumed.Credentials.SecretAccessKey,
+			*assumed.Credentials.SessionToken,
+		)
+		cfg, err = awsconfig.LoadDefaultConfig(ctx, awsconfig.WithCredentialsProvider(creds))
+		if err != nil {
+			return "", err
+		}
+	}
+
+	stsClient := sts.NewFromConfig(cfg)
+	presignClient := sts.NewPresignClient(stsClient)
+
+	presignedReq, err := presignClient.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", fmt.Errorf("failed to presign EKS token: %w", err)
+	}
+
+	u, err := url.Parse(presignedReq.URL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse presigned EKS URL: %w", err)
+	}
+	q := u.Query()
+	q.Set("x-k8s-aws-id", clusterName)
+	u.RawQuery = q.Encode()
+
+	token := "k8s-aws-v1." + base64.RawURLEncoding.EncodeToString([]byte(u.String()))
+	return token, nil
+}
+
+// NewClientFromAssumeRole creates a new EKS client using assumed AWS IAM role credentials
+func NewClientFromAssumeRole(ctx context.Context, apiServerURL string, caCertBase64 string, clusterName string, roleARN string) (*EKSClusterClient, error) {
+	token, err := GenerateEKSToken(ctx, clusterName, roleARN)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate EKS authentication token: %w", err)
+	}
+
+	caCert, err := base64.StdEncoding.DecodeString(caCertBase64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to base64 decode CA certificate: %w", err)
+	}
+
+	config := &rest.Config{
+		Host:        apiServerURL,
+		BearerToken: token,
+		TLSClientConfig: rest.TLSClientConfig{
+			CAData: caCert,
+		},
+		Timeout: 5 * time.Second,
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	dynClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &EKSClusterClient{
+		Clientset:     clientset,
+		DynamicClient: dynClient,
+	}, nil
 }

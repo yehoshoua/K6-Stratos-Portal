@@ -3,7 +3,9 @@
 import React, { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Sidebar from './Sidebar';
+import CommandPalette from './CommandPalette';
 import { usePreferences } from './PreferencesContext';
+import { api } from '@/services/api';
 
 export default function LayoutWrapper({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -15,14 +17,12 @@ export default function LayoutWrapper({ children }: { children: React.ReactNode 
   useEffect(() => {
     if (isLoginPage) return;
 
-    const token = localStorage.getItem('token');
-
-    if (!token) {
-      setIsAuthenticated(false);
-      router.replace('/login');
-    } else {
-      setIsAuthenticated(true);
-    }
+    api.getMe()
+      .then(() => setIsAuthenticated(true))
+      .catch(() => {
+        setIsAuthenticated(false);
+        router.replace('/login');
+      });
   }, [isLoginPage, pathname, router]);
 
   // Login page renders immediately — no auth gate (avoids loading flash + redirect bounce)
@@ -53,14 +53,21 @@ export default function LayoutWrapper({ children }: { children: React.ReactNode 
               {t('secureSession')}
             </span>
           </div>
-          <div className="text-xs text-slate-500">
-            {t('syncTime')} : {new Date().toLocaleTimeString(lang)}
+          <div className="flex items-center gap-4">
+            <span className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-500 border border-slate-800 rounded-lg px-2 py-1">
+              <kbd className="font-sans font-semibold">⌘K</kbd>
+              <span>{t('commandPaletteHint')}</span>
+            </span>
+            <div className="text-xs text-slate-500">
+              {t('syncTime')} : {new Date().toLocaleTimeString(lang)}
+            </div>
           </div>
         </header>
         <main className="flex-1 p-8 overflow-y-auto">
           {children}
         </main>
       </div>
+      <CommandPalette />
     </div>
   );
 }

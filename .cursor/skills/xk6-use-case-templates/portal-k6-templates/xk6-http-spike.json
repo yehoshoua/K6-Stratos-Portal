@@ -1,0 +1,15 @@
+{
+  "name": "xk6-http-spike",
+  "template_type": "testrun",
+  "parallelism": 5,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "spike.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "1",
+  "mem_limit": "1Gi",
+  "script_content": "// Spike test — sudden traffic increase.\n// Portal: template_type=testrun, parallelism=5-50\nimport http from 'k6/http';\nimport { check, sleep } from 'k6';\n\nconst BASE_URL = __ENV.BASE_URL || 'https://test.k6.io';\nconst API_PATH = __ENV.API_PATH || '/';\n\nexport const options = {\n  scenarios: {\n    spike: {\n      executor: 'ramping-vus',\n      startVUs: 0,\n      stages: [\n        { duration: '10s', target: 10 },\n        { duration: '1m', target: 500 },\n        { duration: '10s', target: 10 },\n        { duration: '3m', target: 10 },\n        { duration: '10s', target: 0 },\n      ],\n    },\n  },\n  thresholds: {\n    http_req_failed: ['rate<0.1'],\n  },\n};\n\nexport default function () {\n  const res = http.get(`${BASE_URL}${API_PATH}`);\n  check(res, { 'status is 2xx': (r) => r.status >= 200 && r.status < 400 });\n  sleep(0.1);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "http",
+  "description": "xk6 http template — spike.js"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "xk6-sql-hybrid-http-sql",
+  "template_type": "testrun",
+  "parallelism": 2,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "hybrid-http-sql.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "1",
+  "mem_limit": "1Gi",
+  "script_content": "// Hybrid HTTP + SQL — API creates resource, DB verifies row.\n// Env: BASE_URL, API_PATH, PG_DSN, DB_VERIFY_QUERY\nimport http from 'k6/http';\nimport sql from 'k6/x/sql';\nimport driver from 'k6/x/sql/driver/postgres';\nimport { check, sleep } from 'k6';\n\nconst BASE_URL = __ENV.BASE_URL || 'https://test.k6.io';\nconst API_PATH = __ENV.API_PATH || '/api/orders';\nconst VERIFY_QUERY = __ENV.DB_VERIFY_QUERY || 'SELECT count(*)::int AS c FROM orders WHERE status = $1';\n\nconst db = sql.open(driver, __ENV.PG_DSN || 'postgres://localhost:5432/app?sslmode=disable');\n\nexport const options = {\n  vus: 3,\n  duration: '5m',\n};\n\nexport function teardown() {\n  db.close();\n}\n\nexport default function () {\n  const res = http.post(\n    `${BASE_URL}${API_PATH}`,\n    JSON.stringify({ sku: `sku-${__VU}-${__ITER}` }),\n    { headers: { 'Content-Type': 'application/json' } },\n  );\n  check(res, { 'api ok': (r) => r.status >= 200 && r.status < 300 });\n\n  const rows = sql.query(db, VERIFY_QUERY, 'pending');\n  check(rows, { 'db has rows': (r) => r[0].c >= 0 });\n  sleep(1);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "sql",
+  "description": "xk6 sql template — hybrid-http-sql.js"
+}

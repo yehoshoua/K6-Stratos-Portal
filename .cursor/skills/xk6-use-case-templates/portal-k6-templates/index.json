@@ -1,0 +1,233 @@
+[
+  {
+    "name": "xk6-http-smoke",
+    "file": "xk6-http-smoke.json",
+    "template_type": "job",
+    "script_file": "smoke.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-http-load",
+    "file": "xk6-http-load.json",
+    "template_type": "testrun",
+    "script_file": "load.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-http-stress",
+    "file": "xk6-http-stress.json",
+    "template_type": "testrun",
+    "script_file": "stress.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-http-spike",
+    "file": "xk6-http-spike.json",
+    "template_type": "testrun",
+    "script_file": "spike.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-http-soak",
+    "file": "xk6-http-soak.json",
+    "template_type": "cronjob",
+    "script_file": "soak.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-http-breakpoint",
+    "file": "xk6-http-breakpoint.json",
+    "template_type": "testrun",
+    "script_file": "breakpoint.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-http-rest-crud",
+    "file": "xk6-http-rest-crud.json",
+    "template_type": "testrun",
+    "script_file": "rest-crud.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-http-auth-jwt",
+    "file": "xk6-http-auth-jwt.json",
+    "template_type": "testrun",
+    "script_file": "auth-jwt.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-http-websocket",
+    "file": "xk6-http-websocket.json",
+    "template_type": "testrun",
+    "script_file": "websocket.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-http-rate-limit",
+    "file": "xk6-http-rate-limit.json",
+    "template_type": "testrun",
+    "script_file": "rate-limit.js",
+    "category": "http"
+  },
+  {
+    "name": "xk6-sql-read-under-load",
+    "file": "xk6-sql-read-under-load.json",
+    "template_type": "testrun",
+    "script_file": "read-under-load.js",
+    "category": "sql"
+  },
+  {
+    "name": "xk6-sql-write-under-load",
+    "file": "xk6-sql-write-under-load.json",
+    "template_type": "testrun",
+    "script_file": "write-under-load.js",
+    "category": "sql"
+  },
+  {
+    "name": "xk6-sql-hybrid-http-sql",
+    "file": "xk6-sql-hybrid-http-sql.json",
+    "template_type": "testrun",
+    "script_file": "hybrid-http-sql.js",
+    "category": "sql"
+  },
+  {
+    "name": "xk6-sql-connection-pool",
+    "file": "xk6-sql-connection-pool.json",
+    "template_type": "testrun",
+    "script_file": "connection-pool.js",
+    "category": "sql"
+  },
+  {
+    "name": "xk6-aws-s3-upload-download",
+    "file": "xk6-aws-s3-upload-download.json",
+    "template_type": "testrun",
+    "script_file": "s3-upload-download.js",
+    "category": "aws"
+  },
+  {
+    "name": "xk6-aws-sqs-send-receive",
+    "file": "xk6-aws-sqs-send-receive.json",
+    "template_type": "testrun",
+    "script_file": "sqs-send-receive.js",
+    "category": "aws"
+  },
+  {
+    "name": "xk6-aws-lambda-invoke",
+    "file": "xk6-aws-lambda-invoke.json",
+    "template_type": "testrun",
+    "script_file": "lambda-invoke.js",
+    "category": "aws"
+  },
+  {
+    "name": "xk6-aws-kinesis-put",
+    "file": "xk6-aws-kinesis-put.json",
+    "template_type": "testrun",
+    "script_file": "kinesis-put.js",
+    "category": "aws"
+  },
+  {
+    "name": "xk6-aws-ssm-get-parameter",
+    "file": "xk6-aws-ssm-get-parameter.json",
+    "template_type": "job",
+    "script_file": "ssm-get-parameter.js",
+    "category": "aws"
+  },
+  {
+    "name": "xk6-aws-secrets-manager-get",
+    "file": "xk6-aws-secrets-manager-get.json",
+    "template_type": "job",
+    "script_file": "secrets-manager-get.js",
+    "category": "aws"
+  },
+  {
+    "name": "xk6-aws-kms-encrypt",
+    "file": "xk6-aws-kms-encrypt.json",
+    "template_type": "testrun",
+    "script_file": "kms-encrypt.js",
+    "category": "aws"
+  },
+  {
+    "name": "xk6-aws-eventbridge-put-events",
+    "file": "xk6-aws-eventbridge-put-events.json",
+    "template_type": "testrun",
+    "script_file": "eventbridge-put-events.js",
+    "category": "aws"
+  },
+  {
+    "name": "xk6-aws-pipeline-http-sqs",
+    "file": "xk6-aws-pipeline-http-sqs.json",
+    "template_type": "testrun",
+    "script_file": "pipeline-http-sqs.js",
+    "category": "aws"
+  },
+  {
+    "name": "xk6-chaos-network-latency",
+    "file": "xk6-chaos-network-latency.json",
+    "template_type": "testrun",
+    "script_file": "network-latency.js",
+    "category": "chaos"
+  },
+  {
+    "name": "xk6-chaos-pod-kill",
+    "file": "xk6-chaos-pod-kill.json",
+    "template_type": "testrun",
+    "script_file": "pod-kill.js",
+    "category": "chaos"
+  },
+  {
+    "name": "xk6-chaos-with-http-load",
+    "file": "xk6-chaos-with-http-load.json",
+    "template_type": "testrun",
+    "script_file": "chaos-with-http-load.js",
+    "category": "chaos"
+  },
+  {
+    "name": "xk6-chaos-rollout-under-load",
+    "file": "xk6-chaos-rollout-under-load.json",
+    "template_type": "testrun",
+    "script_file": "rollout-under-load.js",
+    "category": "chaos"
+  },
+  {
+    "name": "xk6-k8s-scale-deployment",
+    "file": "xk6-k8s-scale-deployment.json",
+    "template_type": "testrun",
+    "script_file": "scale-deployment.js",
+    "category": "k8s"
+  },
+  {
+    "name": "xk6-k8s-wait-rollout",
+    "file": "xk6-k8s-wait-rollout.json",
+    "template_type": "job",
+    "script_file": "wait-rollout.js",
+    "category": "k8s"
+  },
+  {
+    "name": "xk6-k8s-check-pod-readiness",
+    "file": "xk6-k8s-check-pod-readiness.json",
+    "template_type": "job",
+    "script_file": "check-pod-readiness.js",
+    "category": "k8s"
+  },
+  {
+    "name": "xk6-obs-loki-push",
+    "file": "xk6-obs-loki-push.json",
+    "template_type": "testrun",
+    "script_file": "loki-push.js",
+    "category": "observability"
+  },
+  {
+    "name": "xk6-obs-prometheus-remote-write",
+    "file": "xk6-obs-prometheus-remote-write.json",
+    "template_type": "testrun",
+    "script_file": "prometheus-remote-write.js",
+    "category": "observability"
+  },
+  {
+    "name": "xk6-exec-shell-check",
+    "file": "xk6-exec-shell-check.json",
+    "template_type": "job",
+    "script_file": "shell-check.js",
+    "category": "exec"
+  }
+]

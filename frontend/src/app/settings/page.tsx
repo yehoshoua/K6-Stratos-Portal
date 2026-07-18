@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { 
   Settings, 
   Database, 
@@ -15,7 +15,11 @@ import {
   Edit,
   FileCode2,
   Users,
-  Key
+  Key,
+  Activity,
+  Compass,
+  CloudLightning,
+  RefreshCw
 } from 'lucide-react';
 import { api, ClusterConfig, InfluxServerConfig, K6Template, K6TemplateType, User, SSOConfig, APIToken, RunDefaults } from '@/services/api';
 import { RUNNER_IMAGE_PLACEHOLDER } from '@/utils/clusterImage';
@@ -228,6 +232,15 @@ export default function SettingsPage() {
   const [confirmClusterName, setConfirmClusterName] = useState('');
   const [loadingClusters, setLoadingClusters] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+
+  // AWS EKS Discovery states
+  const [discoveryConfig, setDiscoveryConfig] = useState<any>(null);
+  const [discoveredClusters, setDiscoveredClusters] = useState<any[]>([]);
+  const [scanning, setScanning] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [discoverySuccess, setDiscoverySuccess] = useState<string | null>(null);
+  const [selectedDiscovered, setSelectedDiscovered] = useState<string[]>([]);
   
   const [newCluster, setNewCluster] = useState({
     name: '',
@@ -483,9 +496,223 @@ export default function () {
     schedule_cron_expression: '0 11 * * *',
     schedule_active: true,
     schedule_cluster_id: '',
-    schedule_namespace: 'default',
+    schedule_namespace: '',
   });
-  const [templateScheduleNamespaces, setTemplateScheduleNamespaces] = useState<string[]>(['default']);
+  const [templateScheduleNamespaces, setTemplateScheduleNamespaces] = useState<string[]>([]);
+
+  interface K6Stage {
+    duration: string;
+    target: number;
+  }
+
+  interface StagesChart {
+    linePath: string;
+    areaPath: string;
+    points: { x: number; y: number; time: number; vu: number; label: string; duration: string }[];
+    maxTime: number;
+    maxVU: number;
+  }
+
+  const parseDurationToSeconds = (duration: string): number => {
+    const match = duration.trim().match(/^(\d+)([smh])$/);
+    if (!match) return 0;
+    const val = parseInt(match[1], 10);
+    const unit = match[2];
+    switch (unit) {
+      case 's': return val;
+      case 'm': return val * 60;
+      case 'h': return val * 3600;
+      default: return 0;
+    }
+  };
+
+  const formatSeconds = (totalSecs: number): string => {
+    if (totalSecs < 60) return `${totalSecs}s`;
+    const mins = Math.floor(totalSecs / 60);
+    const secs = totalSecs % 60;
+    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  };
+
+  const formatDurationForScript = (totalSecs: number): string => {
+    const seconds = Math.max(1, Math.round(totalSecs));
+    if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+    if (seconds % 60 === 0) return `${seconds / 60}m`;
+    return `${seconds}s`;
+  };
+
+  const parseStagesFromScript = (script: string): K6Stage[] => {
+    if (!script) return [];
+    const stagesMatch = script.match(/stages:\s*\[([\s\S]*?)\]/);
+    if (!stagesMatch) return [];
+    
+    const stagesStr = stagesMatch[1];
+    const objectRegex = /\{([\s\S]*?)\}/g;
+    const stages: K6Stage[] = [];
+    let objMatch;
+    while ((objMatch = objectRegex.exec(stagesStr)) !== null) {
+      const objContent = objMatch[1];
+      const durationMatch = objContent.match(/duration:\s*['"`]([^'"`]+)['"`]/);
+      const targetMatch = objContent.match(/target:\s*(\d+)/);
+      if (durationMatch && targetMatch) {
+        stages.push({
+          duration: durationMatch[1],
+          target: parseInt(targetMatch[1], 10)
+        });
+      }
+    }
+    return stages;
+  };
+
+  const updateStagesInScript = (script: string, stages: K6Stage[]): string => {
+    if (!script) return script;
+    const stagesStr = stages.map(s => `        { duration: '${s.duration}', target: ${s.target} }`).join(',\n');
+    const replacement = `stages: [\n${stagesStr}\n      ]`;
+    if (/stages:\s*\[[\s\S]*?\]/.test(script)) {
+      return script.replace(/stages:\s*\[[\s\S]*?\]/, replacement);
+    }
+    return script;
+  };
+
+  const enableVisualStagesInScript = (script: string): string => {
+    if (!script) return script;
+    const defaultStages = [
+      { duration: '1m', target: 20 },
+      { duration: '3m', target: 20 },
+      { duration: '1m', target: 0 }
+    ];
+    const stagesStr = defaultStages.map(s => `        { duration: '${s.duration}', target: ${s.target} }`).join(',\n');
+    const optionsMatch = script.match(/export\s+const\s+options\s*=\s*\{([\s\S]*?)\};/);
+    if (optionsMatch) {
+      const optionsContent = optionsMatch[1];
+      if (optionsContent.includes('stages:')) {
+        return script;
+      }
+      let newOptionsContent = `  scenarios: {
+    ramping: {
+      executor: 'ramping-vus',
+      startVUs: 0,
+      stages: [
+${stagesStr}
+      ],
+    },
+  }`;
+      const thresholdsMatch = optionsContent.match(/thresholds:\s*\{([\s\S]*?)\}/);
+      if (thresholdsMatch) {
+        newOptionsContent += `,\n  thresholds: {${thresholdsMatch[1]}}`;
+      }
+      return script.replace(/export\s+const\s+options\s*=\s*\{[\s\S]*?\};/, `export const options = {\n${newOptionsContent}\n};`);
+    }
+    const defaultOptions = `export const options = {
+  scenarios: {
+    ramping: {
+      executor: 'ramping-vus',
+      startVUs: 0,
+      stages: [
+${stagesStr}
+      ],
+    },
+  },
+};\n\n`;
+    return defaultOptions + script;
+  };
+
+  const generateSvgPaths = (stages: K6Stage[]): StagesChart => {
+    const width = 400;
+    const height = 150;
+    const paddingX = 30;
+    const paddingY = 20;
+    
+    if (stages.length === 0) {
+      return { linePath: '', areaPath: '', points: [], maxTime: 60, maxVU: 10 };
+    }
+    
+    const points: { x: number; y: number; time: number; vu: number; label: string; duration: string }[] = [];
+    points.push({ x: 0, y: 0, time: 0, vu: 0, label: 'Start', duration: '0s' });
+    
+    let cumulativeTime = 0;
+    stages.forEach((stage, idx) => {
+      const secs = parseDurationToSeconds(stage.duration);
+      cumulativeTime += secs;
+      points.push({
+        x: 0,
+        y: 0,
+        time: cumulativeTime,
+        vu: stage.target,
+        label: `Stage ${idx + 1}`,
+        duration: stage.duration
+      });
+    });
+    
+    // Keep room after the last point so its duration can also be extended by drag.
+    const maxTime = Math.max(Math.ceil(cumulativeTime * 1.25), 60);
+    const maxVU = Math.max(Math.ceil(Math.max(...points.map(p => p.vu), 10) * 1.25), 10);
+    
+    const chartWidth = width - 2 * paddingX;
+    const chartHeight = height - 2 * paddingY;
+    
+    points.forEach(p => {
+      p.x = paddingX + (p.time / maxTime) * chartWidth;
+      p.y = height - paddingY - (p.vu / maxVU) * chartHeight;
+    });
+    
+    const linePath = points.map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+    const areaPath = `${linePath} L ${points[points.length - 1].x} ${height - paddingY} L ${points[0].x} ${height - paddingY} Z`;
+    
+    return { linePath, areaPath, points, maxTime, maxVU };
+  };
+
+  const [hoveredPoint, setHoveredPoint] = useState<number | null>(null);
+  const [draggedStage, setDraggedStage] = useState<number | null>(null);
+  const stagesChartRef = useRef<SVGSVGElement | null>(null);
+
+  const visualStages = parseStagesFromScript(templateConfig.script_content);
+
+  const handleUpdateVisualStages = (newStages: K6Stage[]) => {
+    const updatedScript = updateStagesInScript(templateConfig.script_content, newStages);
+    setTemplateConfig(prev => ({ ...prev, script_content: updatedScript }));
+  };
+
+  const updateStageFromPointer = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (draggedStage === null || !stagesChartRef.current) return;
+
+    const svg = stagesChartRef.current;
+    const matrix = svg.getScreenCTM();
+    if (!matrix) return;
+
+    const point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    const svgPoint = point.matrixTransform(matrix.inverse());
+    const paddingX = 30;
+    const paddingY = 20;
+    const chartWidth = 340;
+    const chartHeight = 110;
+    const { maxTime, maxVU } = generateSvgPaths(visualStages);
+    const x = Math.min(370, Math.max(paddingX, svgPoint.x));
+    const y = Math.min(130, Math.max(paddingY, svgPoint.y));
+    const target = Math.max(0, Math.round(((130 - y) / chartHeight) * maxVU));
+    const previousTotal = visualStages
+      .slice(0, draggedStage)
+      .reduce((total, stage) => total + parseDurationToSeconds(stage.duration), 0);
+    const requestedTotal = Math.round(((x - paddingX) / chartWidth) * maxTime);
+    const currentDuration = parseDurationToSeconds(visualStages[draggedStage].duration);
+    const nextDuration = draggedStage < visualStages.length - 1
+      ? parseDurationToSeconds(visualStages[draggedStage + 1].duration)
+      : 0;
+    const maximumTotal = draggedStage < visualStages.length - 1
+      ? previousTotal + currentDuration + nextDuration - 1
+      : maxTime;
+    const duration = Math.max(1, Math.min(maximumTotal - previousTotal, requestedTotal - previousTotal));
+    const nextStages = [...visualStages];
+    nextStages[draggedStage] = { ...nextStages[draggedStage], duration: formatDurationForScript(duration), target };
+    if (draggedStage < nextStages.length - 1) {
+      nextStages[draggedStage + 1] = {
+        ...nextStages[draggedStage + 1],
+        duration: formatDurationForScript(currentDuration + nextDuration - duration),
+      };
+    }
+    handleUpdateVisualStages(nextStages);
+  };
 
   const templateTypeLabel = (type: K6TemplateType | string) => {
     switch (type) {
@@ -500,14 +727,14 @@ export default function () {
 
   const loadTemplateScheduleNamespaces = async (clusterId: string) => {
     if (!clusterId) {
-      setTemplateScheduleNamespaces(['default']);
+      setTemplateScheduleNamespaces([]);
       return;
     }
     try {
       const ns = await api.getNamespaces(clusterId);
-      setTemplateScheduleNamespaces(ns?.length ? ns : ['default']);
+      setTemplateScheduleNamespaces(ns || []);
     } catch {
-      setTemplateScheduleNamespaces(['default']);
+      setTemplateScheduleNamespaces([]);
     }
   };
 
@@ -885,6 +1112,59 @@ export default function () {
     );
   };
 
+  const loadDiscoveryConfig = async () => {
+    try {
+      const cfg = await api.getEKSDiscoveryConfig();
+      setDiscoveryConfig(cfg);
+    } catch (err) {
+      console.error('Failed to load EKS discovery config', err);
+    }
+  };
+
+  const handleScanEKS = async () => {
+    setScanning(true);
+    setDiscoveryError(null);
+    setDiscoverySuccess(null);
+    try {
+      const list = await api.discoverEKSClusters();
+      setDiscoveredClusters(list || []);
+      // Pre-select clusters that are not already registered
+      setSelectedDiscovered(list ? list.filter(c => !c.already_registered).map(c => c.api_server_url) : []);
+    } catch (err: any) {
+      setDiscoveryError(err.message || 'Failed to scan EKS clusters');
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const handleSyncEKS = async () => {
+    if (selectedDiscovered.length === 0) return;
+    setSyncing(true);
+    setDiscoveryError(null);
+    setDiscoverySuccess(null);
+    try {
+      const toSync = discoveredClusters.filter(c => selectedDiscovered.includes(c.api_server_url));
+      // Map to default environment based on cluster name or sandbox
+      const toSyncWithEnv = toSync.map(c => ({
+        ...c,
+        environment: c.name.toLowerCase().includes('prod') ? 'prod' : (c.name.toLowerCase().includes('stage') ? 'stage' : 'sandbox')
+      }));
+      const res = await api.syncDiscoveredEKSClusters(toSyncWithEnv);
+      if (res.success) {
+        setDiscoverySuccess(t('discoverSuccess') || `Successfully synced ${res.count} EKS cluster(s)!`);
+        setDiscoveredClusters([]);
+        setSelectedDiscovered([]);
+        // Reload clusters list
+        const clusterList = await api.getClusters();
+        setClusters(clusterList || []);
+      }
+    } catch (err: any) {
+      setDiscoveryError(err.message || 'Failed to sync EKS clusters');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const loadSettingsData = async () => {
     if (!isAdmin) return;
     try {
@@ -898,6 +1178,7 @@ export default function () {
       await loadSSOConfig();
       await loadAPITokens();
       await loadRunDefaults();
+      await loadDiscoveryConfig();
     } catch (err) {
       console.error('Failed to load settings data', err);
     } finally {
@@ -2217,7 +2498,7 @@ export default function () {
       {/* K6 Template Add/Edit Modal */}
       {isTemplateModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-8 shadow-2xl relative">
+          <div className={`bg-slate-900 border border-slate-800 rounded-3xl w-full ${visualStages.length > 0 ? 'max-w-5xl' : 'max-w-lg'} p-8 shadow-2xl relative transition-all duration-300`}>
             <button
               onClick={() => setIsTemplateModalOpen(false)}
               className="absolute top-6 right-6 text-slate-500 hover:text-slate-300 p-1 cursor-pointer"
@@ -2236,199 +2517,388 @@ export default function () {
             )}
 
             <form onSubmit={handleSaveTemplateConfig} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('templateType')}</label>
-                <select
-                  value={templateConfig.template_type}
-                  onChange={(e) => {
-                    const nextType = e.target.value as K6TemplateType;
-                    setTemplateConfig({
-                      ...templateConfig,
-                      template_type: nextType,
-                      parallelism: nextType === 'testrun' ? Math.max(templateConfig.parallelism || 1, 1) : 0,
-                      schedule_enabled: nextType === 'testrun' ? templateConfig.schedule_enabled : false,
-                    });
-                  }}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
-                >
-                  <option value="testrun">{t('templateTypeTestRun')}</option>
-                  <option value="cronjob">{t('templateTypeCronJob')}</option>
-                  <option value="job">{t('templateTypeJob')}</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('templateName')}</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="E.g., High Load API Test"
-                  value={templateConfig.name}
-                  onChange={(e) => setTemplateConfig({ ...templateConfig, name: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
-                />
-              </div>
-
-              <div className={`grid gap-4 ${templateConfig.template_type === 'testrun' ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                {templateConfig.template_type === 'testrun' && (
+              <div className={visualStages.length > 0 ? "grid grid-cols-1 lg:grid-cols-2 gap-8" : "space-y-4"}>
+                {/* Left Column: General Settings & Script Content */}
+                <div className="space-y-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('parallelism')}</label>
+                    <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('templateType')}</label>
+                    <select
+                      value={templateConfig.template_type}
+                      onChange={(e) => {
+                        const nextType = e.target.value as K6TemplateType;
+                        setTemplateConfig({
+                          ...templateConfig,
+                          template_type: nextType,
+                          parallelism: nextType === 'testrun' ? Math.max(templateConfig.parallelism || 1, 1) : 0,
+                          schedule_enabled: nextType === 'testrun' ? templateConfig.schedule_enabled : false,
+                        });
+                      }}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
+                    >
+                      <option value="testrun">{t('templateTypeTestRun')}</option>
+                      <option value="cronjob">{t('templateTypeCronJob')}</option>
+                      <option value="job">{t('templateTypeJob')}</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('templateName')}</label>
                     <input
-                      type="number"
-                      min={1}
-                      max={50}
+                      type="text"
                       required
-                      value={templateConfig.parallelism}
-                      onChange={(e) => setTemplateConfig({ ...templateConfig, parallelism: Number(e.target.value) })}
+                      placeholder="E.g., High Load API Test"
+                      value={templateConfig.name}
+                      onChange={(e) => setTemplateConfig({ ...templateConfig, name: e.target.value })}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
                     />
                   </div>
-                )}
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('scriptConfigMapName')}</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="k6-test-script"
-                    value={templateConfig.script_name}
-                    onChange={(e) => setTemplateConfig({ ...templateConfig, script_name: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
-                  />
-                </div>
-              </div>
 
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('jsFilename')}</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="test.js"
-                    value={templateConfig.script_file}
-                    onChange={(e) => setTemplateConfig({ ...templateConfig, script_file: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('cpuLimit')}</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="10m"
-                    value={templateConfig.cpu_limit}
-                    onChange={(e) => setTemplateConfig({ ...templateConfig, cpu_limit: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('memoryLimit')}</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="16Mi"
-                    value={templateConfig.mem_limit}
-                    onChange={(e) => setTemplateConfig({ ...templateConfig, mem_limit: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('runnerImage')}</label>
-                <input
-                  type="text"
-                  placeholder="123456789012.dkr.ecr.us-west-2.amazonaws.com/xk6:latest"
-                  value={templateConfig.runner_image}
-                  onChange={(e) => setTemplateConfig({ ...templateConfig, runner_image: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('jsScriptContent')}</label>
-                <textarea
-                  rows={6}
-                  value={templateConfig.script_content}
-                  onChange={(e) => setTemplateConfig({ ...templateConfig, script_content: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none font-mono leading-relaxed"
-                  placeholder="import http from 'k6/http'; ..."
-                />
-              </div>
-
-              {templateConfig.template_type === 'testrun' && (
-                <div className="space-y-3 border border-slate-800 rounded-2xl p-4 bg-slate-950/40">
-                  <div className="flex items-center justify-between">
+                  <div className={`grid gap-4 ${templateConfig.template_type === 'testrun' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                    {templateConfig.template_type === 'testrun' && (
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('parallelism')}</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          required
+                          value={templateConfig.parallelism}
+                          onChange={(e) => setTemplateConfig({ ...templateConfig, parallelism: Number(e.target.value) })}
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
+                        />
+                      </div>
+                    )}
                     <div>
-                      <p className="text-xs font-semibold text-slate-300">{t('templateScheduleSection')}</p>
-                      <p className="text-[10px] text-slate-500">{t('templateScheduleSectionDesc')}</p>
+                      <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('scriptConfigMapName')}</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="k6-test-script"
+                        value={templateConfig.script_name}
+                        onChange={(e) => setTemplateConfig({ ...templateConfig, script_name: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
+                      />
                     </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('jsFilename')}</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="test.js"
+                        value={templateConfig.script_file}
+                        onChange={(e) => setTemplateConfig({ ...templateConfig, script_file: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('cpuLimit')}</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="10m"
+                        value={templateConfig.cpu_limit}
+                        onChange={(e) => setTemplateConfig({ ...templateConfig, cpu_limit: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('memoryLimit')}</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="16Mi"
+                        value={templateConfig.mem_limit}
+                        onChange={(e) => setTemplateConfig({ ...templateConfig, mem_limit: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('runnerImage')}</label>
                     <input
-                      type="checkbox"
-                      checked={templateConfig.schedule_enabled}
-                      onChange={(e) => setTemplateConfig({ ...templateConfig, schedule_enabled: e.target.checked })}
-                      className="w-4 h-4 accent-purple-500"
+                      type="text"
+                      placeholder="123456789012.dkr.ecr.us-west-2.amazonaws.com/xk6:latest"
+                      value={templateConfig.runner_image}
+                      onChange={(e) => setTemplateConfig({ ...templateConfig, runner_image: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
                     />
                   </div>
 
-                  {templateConfig.schedule_enabled && (
-                    <div className="space-y-3">
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('cronExpression')}</label>
-                        <input
-                          type="text"
-                          required
-                          value={templateConfig.schedule_cron_expression}
-                          onChange={(e) => setTemplateConfig({ ...templateConfig, schedule_cron_expression: e.target.value })}
-                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none font-mono"
-                        />
-                        <p className="text-[10px] text-slate-500 mt-1">{t('cronRoundHourError')}</p>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('jsScriptContent')}</label>
+                    <textarea
+                      rows={6}
+                      value={templateConfig.script_content}
+                      onChange={(e) => setTemplateConfig({ ...templateConfig, script_content: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none font-mono leading-relaxed"
+                      placeholder="import http from 'k6/http'; ..."
+                    />
+                    {visualStages.length === 0 && (
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = enableVisualStagesInScript(templateConfig.script_content);
+                            setTemplateConfig(prev => ({ ...prev, script_content: updated }));
+                          }}
+                          className="flex items-center space-x-2 text-xs font-semibold text-purple-400 hover:text-purple-300 transition cursor-pointer"
+                        >
+                          <Activity className="w-4 h-4" />
+                          <span>{t('enableVisualStages')}</span>
+                        </button>
                       </div>
-                      <div className="grid grid-cols-2 gap-4">
+                    )}
+                  </div>
+
+                  {templateConfig.template_type === 'testrun' && (
+                    <div className="space-y-3 border border-slate-800 rounded-2xl p-4 bg-slate-950/40">
+                      <div className="flex items-center justify-between">
                         <div>
-                          <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('templateScheduleCluster')}</label>
-                          <select
-                            required
-                            value={templateConfig.schedule_cluster_id}
-                            onChange={(e) => {
-                              const clusterId = e.target.value;
-                              setTemplateConfig({ ...templateConfig, schedule_cluster_id: clusterId, schedule_namespace: 'default' });
-                              loadTemplateScheduleNamespaces(clusterId);
-                            }}
-                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
-                          >
-                            <option value="">{t('clusterLabel')}</option>
-                            {clusters.map(c => (
-                              <option key={c.id} value={c.id}>{c.name}</option>
-                            ))}
-                          </select>
+                          <p className="text-xs font-semibold text-slate-300">{t('templateScheduleSection')}</p>
+                          <p className="text-[10px] text-slate-500">{t('templateScheduleSectionDesc')}</p>
                         </div>
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('templateScheduleNamespace')}</label>
-                          <select
-                            required
-                            value={templateConfig.schedule_namespace}
-                            onChange={(e) => setTemplateConfig({ ...templateConfig, schedule_namespace: e.target.value })}
-                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
-                          >
-                            {templateScheduleNamespaces.map(ns => (
-                              <option key={ns} value={ns}>{ns}</option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-                      <label className="flex items-center gap-2 text-xs text-slate-300">
                         <input
                           type="checkbox"
-                          checked={templateConfig.schedule_active}
-                          onChange={(e) => setTemplateConfig({ ...templateConfig, schedule_active: e.target.checked })}
+                          checked={templateConfig.schedule_enabled}
+                          onChange={(e) => setTemplateConfig({ ...templateConfig, schedule_enabled: e.target.checked })}
                           className="w-4 h-4 accent-purple-500"
                         />
-                        {t('templateScheduleActive')}
-                      </label>
+                      </div>
+
+                      {templateConfig.schedule_enabled && (
+                        <div className="space-y-3">
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('cronExpression')}</label>
+                            <input
+                              type="text"
+                              required
+                              value={templateConfig.schedule_cron_expression}
+                              onChange={(e) => setTemplateConfig({ ...templateConfig, schedule_cron_expression: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none font-mono"
+                            />
+                            <p className="text-[10px] text-slate-500 mt-1">{t('cronRoundHourError')}</p>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('templateScheduleCluster')}</label>
+                              <select
+                                required
+                                value={templateConfig.schedule_cluster_id}
+                                onChange={(e) => {
+                                  const clusterId = e.target.value;
+                                  setTemplateConfig({ ...templateConfig, schedule_cluster_id: clusterId, schedule_namespace: '' });
+                                  loadTemplateScheduleNamespaces(clusterId);
+                                }}
+                                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
+                              >
+                                <option value="">{t('clusterLabel')}</option>
+                                {clusters.map(c => (
+                                  <option key={c.id} value={c.id}>{c.name}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('templateScheduleNamespace')}</label>
+                              <select
+                                required
+                                value={templateConfig.schedule_namespace}
+                                onChange={(e) => setTemplateConfig({ ...templateConfig, schedule_namespace: e.target.value })}
+                                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
+                              >
+                                {templateScheduleNamespaces.map(ns => (
+                                  <option key={ns} value={ns}>{ns}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                          <label className="flex items-center gap-2 text-xs text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={templateConfig.schedule_active}
+                              onChange={(e) => setTemplateConfig({ ...templateConfig, schedule_active: e.target.checked })}
+                              className="w-4 h-4 accent-purple-500"
+                            />
+                            {t('templateScheduleActive')}
+                          </label>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-              )}
+
+                {/* Right Column: Visual Stages Builder */}
+                {visualStages.length > 0 && (() => {
+                  const { linePath, areaPath, points } = generateSvgPaths(visualStages);
+                  return (
+                    <div className="space-y-4 border-t lg:border-t-0 lg:border-l border-slate-800 pt-6 lg:pt-0 lg:pl-8 flex flex-col">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-2">
+                          <Activity className="w-5 h-5 text-purple-500" />
+                          <h4 className="text-sm font-bold text-white">{t('visualStagesTitle')}</h4>
+                        </div>
+                      </div>
+
+                      {/* SVG Chart Preview */}
+                      <div className="bg-slate-950 border border-slate-850 rounded-2xl p-4 relative overflow-hidden">
+                        <div className="absolute top-3 right-4 text-[10px] font-medium text-slate-400 bg-slate-900/80 px-2 py-1 rounded border border-slate-800">
+                          {hoveredPoint !== null && points[hoveredPoint] ? (
+                            <span>
+                              {points[hoveredPoint].label}: <strong className="text-purple-400">{points[hoveredPoint].vu} VUs</strong> @ {formatSeconds(points[hoveredPoint].time)}
+                            </span>
+                          ) : (
+                            <span>{t('visualChart')}</span>
+                          )}
+                        </div>
+
+                        <svg
+                          ref={stagesChartRef}
+                          viewBox="0 0 400 150"
+                          className="w-full h-auto mt-4 touch-none"
+                          onPointerMove={updateStageFromPointer}
+                          onPointerUp={() => setDraggedStage(null)}
+                          onPointerCancel={() => setDraggedStage(null)}
+                        >
+                          <defs>
+                            <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="rgb(168, 85, 247)" stopOpacity="0.25" />
+                              <stop offset="100%" stopColor="rgb(168, 85, 247)" stopOpacity="0.0" />
+                            </linearGradient>
+                          </defs>
+
+                          {/* Grid Lines */}
+                          <line x1="30" y1="20" x2="370" y2="20" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+                          <line x1="30" y1="57" x2="370" y2="57" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+                          <line x1="30" y1="94" x2="370" y2="94" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+                          <line x1="30" y1="130" x2="370" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+
+                          <line x1="30" y1="20" x2="30" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+                          <line x1="143" y1="20" x2="143" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+                          <line x1="256" y1="20" x2="256" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+                          <line x1="370" y1="20" x2="370" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+
+                          {/* Area Path */}
+                          {areaPath && <path d={areaPath} fill="url(#chartGradient)" />}
+
+                          {/* Line Path */}
+                          {linePath && (
+                            <path
+                              d={linePath}
+                              fill="none"
+                              stroke="rgb(168, 85, 247)"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          )}
+
+                          {/* Points */}
+                          {points.map((p, idx) => (
+                            <g key={idx}>
+                              {idx > 0 && (
+                                <circle
+                                  cx={p.x}
+                                  cy={p.y}
+                                  r="12"
+                                  fill="transparent"
+                                  className="cursor-grab active:cursor-grabbing"
+                                  onPointerDown={(event) => {
+                                    event.preventDefault();
+                                    stagesChartRef.current?.setPointerCapture(event.pointerId);
+                                    setDraggedStage(idx - 1);
+                                    setHoveredPoint(idx);
+                                  }}
+                                />
+                              )}
+                              <circle
+                                cx={p.x}
+                                cy={p.y}
+                                r={hoveredPoint === idx || draggedStage === idx - 1 ? 6 : 4}
+                                fill={idx === 0 ? "rgb(148, 163, 184)" : "rgb(168, 85, 247)"}
+                                stroke="rgb(15, 23, 42)"
+                                strokeWidth="2"
+                                className={idx === 0 ? "transition-all duration-150" : "transition-all duration-150 cursor-grab active:cursor-grabbing"}
+                                onMouseEnter={() => setHoveredPoint(idx)}
+                                onMouseLeave={() => draggedStage === null && setHoveredPoint(null)}
+                              />
+                            </g>
+                          ))}
+                        </svg>
+                      </div>
+
+                      {/* Stages List */}
+                      <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1 custom-scrollbar">
+                        {visualStages.map((stage, idx) => (
+                          <div key={idx} className="flex items-center space-x-3 bg-slate-950/60 border border-slate-850 p-3 rounded-xl hover:border-slate-800 transition">
+                            <div className="flex-1 grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">{t('duration')}</label>
+                                <input
+                                  type="text"
+                                  required
+                                  value={stage.duration}
+                                  onChange={(e) => {
+                                    const newStages = [...visualStages];
+                                    newStages[idx] = { ...newStages[idx], duration: e.target.value };
+                                    handleUpdateVisualStages(newStages);
+                                  }}
+                                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:border-purple-500 outline-none font-mono"
+                                  placeholder="e.g., 2m"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">{t('targetVUs')}</label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  required
+                                  value={stage.target}
+                                  onChange={(e) => {
+                                    const newStages = [...visualStages];
+                                    newStages[idx] = { ...newStages[idx], target: parseInt(e.target.value, 10) || 0 };
+                                    handleUpdateVisualStages(newStages);
+                                  }}
+                                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:border-purple-500 outline-none"
+                                  placeholder="e.g., 50"
+                                />
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const newStages = visualStages.filter((_, i) => i !== idx);
+                                handleUpdateVisualStages(newStages);
+                              }}
+                              className="text-slate-500 hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/10 transition cursor-pointer mt-4"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Add Stage Button */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const lastStage = visualStages[visualStages.length - 1];
+                          const newStage = lastStage 
+                            ? { duration: lastStage.duration, target: lastStage.target }
+                            : { duration: '1m', target: 10 };
+                          handleUpdateVisualStages([...visualStages, newStage]);
+                        }}
+                        className="w-full py-2 border border-dashed border-slate-800 hover:border-purple-500/50 hover:bg-purple-500/5 text-purple-400 hover:text-purple-300 rounded-xl text-xs font-semibold transition flex items-center justify-center space-x-2 cursor-pointer"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>{t('addStage')}</span>
+                      </button>
+                    </div>
+                  );
+                })()}
+              </div>
 
               <div className="flex space-x-3 pt-4">
                 <button
@@ -3077,4 +3547,3 @@ export default function () {
     </div>
   );
 }
-

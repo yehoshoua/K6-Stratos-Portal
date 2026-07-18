@@ -1,0 +1,15 @@
+{
+  "name": "xk6-http-stress",
+  "template_type": "testrun",
+  "parallelism": 5,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "stress.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "1",
+  "mem_limit": "1Gi",
+  "script_content": "// Stress test — ramp beyond expected capacity.\n// Portal: template_type=testrun, parallelism=5-20, mem=1Gi\nimport http from 'k6/http';\nimport { check, sleep } from 'k6';\n\nconst BASE_URL = __ENV.BASE_URL || 'https://test.k6.io';\nconst API_PATH = __ENV.API_PATH || '/';\n\nexport const options = {\n  scenarios: {\n    stress: {\n      executor: 'ramping-vus',\n      startVUs: 0,\n      stages: [\n        { duration: '2m', target: 100 },\n        { duration: '5m', target: 200 },\n        { duration: '2m', target: 300 },\n        { duration: '5m', target: 300 },\n        { duration: '2m', target: 0 },\n      ],\n    },\n  },\n  thresholds: {\n    http_req_failed: ['rate<0.05'],\n    http_req_duration: ['p(95)<3000'],\n  },\n};\n\nexport default function () {\n  const res = http.get(`${BASE_URL}${API_PATH}`);\n  check(res, { 'status is 2xx': (r) => r.status >= 200 && r.status < 300 });\n  sleep(0.5);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "http",
+  "description": "xk6 http template — stress.js"
+}

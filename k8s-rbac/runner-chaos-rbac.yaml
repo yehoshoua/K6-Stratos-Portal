@@ -1,0 +1,56 @@
+# ==============================================================================
+# K6 TEST RUNNER CHAOS & DISRUPTOR RBAC CONFIGURATION (k6-runner-sa)
+# ==============================================================================
+# This configuration creates the ServiceAccount and Role for the actual K6 runner
+# pods inside the target namespace. It grants permissions required by xk6-disruptor
+# to inject network latency and kill pods, while strictly limiting them to this namespace.
+
+# 1. ServiceAccount for the K6 Runner
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k6-runner-sa
+  namespace: __TARGET_NAMESPACE__ # Replace with your target namespace
+---
+# 2. Local Role for Chaos Execution (Pod Killing & Service/Network Disruption)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: k6-disruptor-runner-role
+  namespace: __TARGET_NAMESPACE__ # Replace with your target namespace
+rules:
+  # Allows listing target pods and deleting them (used for pod termination/kill faults)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  # REQUIRED for xk6-disruptor: uses ephemeral containers to inject disruption agents
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["get", "patch", "update"]
+  # REQUIRED for connecting/controlling the injected disruptor agents
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  # REQUIRED if using WorkloadDisruptor to scale deployments or statefulsets up/down
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "update", "patch"]
+  # OPTIONAL: Required if using pod eviction or graceful node/pod draining faults
+  - apiGroups: ["policy"]
+    resources: ["evictions"]
+    verbs: ["create"]
+---
+# 3. RoleBinding linking the K6 Runner ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: k6-disruptor-runner-binding
+  namespace: __TARGET_NAMESPACE__ # Replace with your target namespace
+subjects:
+  - kind: ServiceAccount
+    name: k6-runner-sa
+    namespace: __TARGET_NAMESPACE__ # Same target namespace
+roleRef:
+  kind: Role
+  name: k6-disruptor-runner-role
+  apiGroup: rbac.authorization.k8s.io

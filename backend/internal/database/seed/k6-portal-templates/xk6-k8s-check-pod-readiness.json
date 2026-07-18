@@ -1,0 +1,15 @@
+{
+  "name": "xk6-k8s-check-pod-readiness",
+  "template_type": "job",
+  "parallelism": 0,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "check-pod-readiness.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "250m",
+  "mem_limit": "256Mi",
+  "script_content": "// Poll pods until all matching labels are Ready.\n// Env: TARGET_NAMESPACE, TARGET_APP_LABEL\nimport { Kubernetes } from 'k6/x/kubernetes';\nimport { check, sleep } from 'k6';\n\nconst NS = __ENV.TARGET_NAMESPACE || 'default';\nconst APP = __ENV.TARGET_APP_LABEL || 'myapp';\n\nconst k8s = new Kubernetes();\n\nexport const options = {\n  vus: 1,\n  iterations: 1,\n};\n\nexport default function () {\n  const deadline = Date.now() + 5 * 60 * 1000;\n  let ready = false;\n\n  while (Date.now() < deadline) {\n    const pods = k8s.pods.list(NS, { labels: { app: APP } });\n    ready = pods.length > 0 && pods.every((p) => p.ready);\n    if (ready) break;\n    sleep(5);\n  }\n\n  check(ready, { 'all pods ready': (v) => v === true });\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "k8s",
+  "description": "xk6 k8s template — check-pod-readiness.js"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "xk6-exec-shell-check",
+  "template_type": "job",
+  "parallelism": 0,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "shell-check.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "250m",
+  "mem_limit": "256Mi",
+  "script_content": "// xk6-exec: run shell command for DNS/TLS/env validation.\n// Portal: template_type=job\nimport exec from 'k6/x/exec';\nimport { check } from 'k6';\n\nconst HOST = __ENV.CHECK_HOST || 'example.com';\n\nexport const options = {\n  vus: 1,\n  iterations: 1,\n};\n\nexport default function () {\n  const nslookup = exec.command('nslookup', [HOST]);\n  check(nslookup, { 'nslookup exit 0': (r) => r.exit_status === 0 });\n\n  const openssl = exec.command('sh', ['-c', `echo | openssl s_client -connect ${HOST}:443 -servername ${HOST} 2>/dev/null | head -n 5`]);\n  check(openssl, { 'tls reachable': (r) => r.exit_status === 0 });\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "exec",
+  "description": "xk6 exec template — shell-check.js"
+}

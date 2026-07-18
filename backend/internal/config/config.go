@@ -6,20 +6,27 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 type Config struct {
-	Port             string
-	EncryptionKey    []byte
-	JWTSecret        []byte
-	InfluxURL        string
-	InfluxToken      string
-	InfluxOrg        string
-	InfluxBucket     string
-	DBType           string
-	DBDSN            string
+	Port          string
+	EncryptionKey []byte
+	JWTSecret     []byte
+	InfluxURL     string
+	InfluxToken   string
+	InfluxOrg     string
+	InfluxBucket  string
+	DBType        string
+	DBDSN         string
+
+	// Guardian multi-agent validation runtime
+	GuardianEnabled bool
+	BedrockModelID  string
+	AWSRegion       string
 }
 
 func LoadConfig() (*Config, error) {
@@ -28,8 +35,12 @@ func LoadConfig() (*Config, error) {
 		port = "8080"
 	}
 
+	production := strings.EqualFold(os.Getenv("APP_ENV"), "production")
 	encKeyStr := os.Getenv("ENCRYPTION_KEY")
 	if encKeyStr == "" {
+		if production {
+			return nil, errors.New("ENCRYPTION_KEY is required when APP_ENV=production")
+		}
 		// Provide a default key for development/demo (32 bytes for AES-256)
 		encKeyStr = "dGhpcy1pcy1hLTMyLWJ5dGUtZGV2ZWxvcG1lbnQta2V5MSE=" // "this-is-a-32-byte-development-key1!" base64 encoded
 	}
@@ -46,7 +57,13 @@ func LoadConfig() (*Config, error) {
 
 	jwtSecretStr := os.Getenv("JWT_SECRET")
 	if jwtSecretStr == "" {
+		if production {
+			return nil, errors.New("JWT_SECRET is required when APP_ENV=production")
+		}
 		jwtSecretStr = "super-secret-jwt-signing-key-for-k6-bedrock-dashboard"
+	}
+	if production && len(jwtSecretStr) < 32 {
+		return nil, fmt.Errorf("JWT_SECRET must be at least 32 bytes when APP_ENV=production")
 	}
 
 	dbType := os.Getenv("DB_TYPE")
@@ -55,16 +72,28 @@ func LoadConfig() (*Config, error) {
 	}
 	dbDSN := os.Getenv("DATABASE_URL")
 
+	guardianEnabled := true
+	if v := os.Getenv("GUARDIAN_ENABLED"); v != "" {
+		guardianEnabled = v != "false" && v != "0"
+	}
+	bedrockModelID := os.Getenv("BEDROCK_MODEL_ID")
+	if bedrockModelID == "" {
+		bedrockModelID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+	}
+
 	return &Config{
-		Port:             port,
-		EncryptionKey:    encKey,
-		JWTSecret:        []byte(jwtSecretStr),
-		InfluxURL:        os.Getenv("INFLUXDB_URL"),
-		InfluxToken:      os.Getenv("INFLUXDB_TOKEN"),
-		InfluxOrg:        os.Getenv("INFLUXDB_ORG"),
-		InfluxBucket:     os.Getenv("INFLUXDB_BUCKET"),
-		DBType:           dbType,
-		DBDSN:            dbDSN,
+		Port:            port,
+		EncryptionKey:   encKey,
+		JWTSecret:       []byte(jwtSecretStr),
+		InfluxURL:       os.Getenv("INFLUXDB_URL"),
+		InfluxToken:     os.Getenv("INFLUXDB_TOKEN"),
+		InfluxOrg:       os.Getenv("INFLUXDB_ORG"),
+		InfluxBucket:    os.Getenv("INFLUXDB_BUCKET"),
+		DBType:          dbType,
+		DBDSN:           dbDSN,
+		GuardianEnabled: guardianEnabled,
+		BedrockModelID:  bedrockModelID,
+		AWSRegion:       os.Getenv("AWS_REGION"),
 	}, nil
 }
 

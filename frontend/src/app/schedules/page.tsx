@@ -15,9 +15,12 @@ import {
 	CheckCircle,
 	Pencil,
 	X,
+	FileDown,
+	Braces,
 } from 'lucide-react';
 import { api, BatchWorkload, ClusterConfig, EcrCheck, K6Template } from '@/services/api';
 import { usePreferences } from '@/components/PreferencesContext';
+import { exportToCSV, exportToJSON } from '@/utils/export';
 
 function sanitizeK8sName(name: string): string {
 	const cleaned = name
@@ -92,7 +95,7 @@ export default function SchedulesPage() {
 
 	const [name, setName] = useState('');
 	const [clusterId, setClusterId] = useState('');
-	const [namespace, setNamespace] = useState('default');
+	const [namespace, setNamespace] = useState('');
 	const [templateId, setTemplateId] = useState('');
 	const [cronExpr, setCronExpr] = useState('*/30 * * * *');
 	const [active, setActive] = useState(true);
@@ -216,11 +219,11 @@ export default function SchedulesPage() {
 	const loadNamespaces = async (cId: string) => {
 		try {
 			const ns = await api.getNamespaces(cId);
-			setNamespaces(ns || ['default']);
-			setNamespace(ns?.[0] || 'default');
+			setNamespaces(ns || []);
+			setNamespace(ns?.[0] || '');
 		} catch {
-			setNamespaces(['default']);
-			setNamespace('default');
+			setNamespaces([]);
+			setNamespace('');
 		}
 	};
 
@@ -673,6 +676,38 @@ export default function SchedulesPage() {
 									<option key={ns} value={ns}>{ns}</option>
 								))}
 							</select>
+							{filteredWorkloads.length > 0 && (
+								<>
+									<button
+										type="button"
+										title={t('exportCsv')}
+										onClick={() =>
+											exportToCSV(
+												'k6-schedules',
+												filteredWorkloads.map((w) => ({
+													name: w.metadata.name,
+													cluster: getClusterName(w.cluster_id),
+													namespace: w.metadata.namespace,
+													kind: w.kind,
+													active: w.status?.active ?? '',
+													suspended: w.status?.suspended ?? '',
+												})),
+											)
+										}
+										className="p-1.5 border border-slate-850 hover:bg-slate-800 text-slate-400 hover:text-slate-100 rounded-xl transition cursor-pointer"
+									>
+										<FileDown className="w-3.5 h-3.5" />
+									</button>
+									<button
+										type="button"
+										title={t('exportJson')}
+										onClick={() => exportToJSON('k6-schedules', filteredWorkloads)}
+										className="p-1.5 border border-slate-850 hover:bg-slate-800 text-slate-400 hover:text-slate-100 rounded-xl transition cursor-pointer"
+									>
+										<Braces className="w-3.5 h-3.5" />
+									</button>
+								</>
+							)}
 						</div>
 					</div>
 

@@ -16,10 +16,8 @@ async function apiFetch(url: string, options: RequestInit = {}): Promise<Respons
 }
 
 function getHeaders(): HeadersInit {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
   return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+	'Content-Type': 'application/json',
   };
 }
 
@@ -192,6 +190,82 @@ export interface TelemetryPoint {
   value: number;
 }
 
+// --- Guardian multi-agent validation runtime ---
+
+export type GuardianSubjectType = 'test_launch' | 'schedule_create' | 'rbac_change' | 'token_grant';
+export type GuardianSeverity = 'info' | 'warn' | 'block';
+export type GuardianVerdict = 'pending' | 'pass' | 'warn' | 'block';
+
+export interface GuardianFinding {
+  agent: string;
+  severity: GuardianSeverity;
+  category: string;
+  message: string;
+  suggested_fix?: string;
+  raw?: string;
+}
+
+export interface GuardianValidateRequest {
+  subject_type: GuardianSubjectType;
+  subject_ref: string;
+  cluster_id?: string;
+  namespace?: string;
+  environment?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface GuardianRun {
+  id: string;
+  subject_type: GuardianSubjectType;
+  subject_ref: string;
+  requested_by: string;
+  cluster_id?: string;
+  namespace?: string;
+  environment?: string;
+  overall_verdict: GuardianVerdict;
+  overall_score: number;
+  overridden: boolean;
+  override_by?: string;
+  override_note?: string;
+  created_at: string;
+  completed_at?: string;
+}
+
+export interface GuardianStreamEvent {
+  finding?: GuardianFinding;
+  done?: boolean;
+  report?: { verdict: GuardianVerdict; score: number; findings: GuardianFinding[] };
+}
+
+export interface FleetClusterStatus {
+  cluster_id: string;
+  cluster_name: string;
+  region?: string;
+  online: boolean;
+  active_runs: number;
+}
+
+export interface FleetSummary {
+  total_accounts: number;
+  total_clusters: number;
+  clusters_online: number;
+  active_test_runs: number;
+  active_schedules: number;
+  open_guardian_blocks: number;
+  recent_alerts: number;
+  clusters: FleetClusterStatus[];
+}
+
+export interface AuditLogEntry {
+  id: number;
+  action: string;
+  actor: string;
+  target?: string;
+  metadata?: string;
+  ip_address?: string;
+  created_at: string;
+}
+
 export const api = {
   // Auth
   async login(username: string, password: string) {
@@ -205,7 +279,7 @@ export const api = {
       throw new Error(err.error || 'Login failed');
     }
     const data = await res.json();
-    localStorage.setItem('token', data.token);
+	localStorage.removeItem('token'); // Remove sessions created by older versions.
     localStorage.setItem('username', data.username);
     localStorage.setItem('role', data.role);
     return data;
@@ -219,14 +293,15 @@ export const api = {
     });
     if (!res.ok) throw new Error('SSO login failed');
     const data = await res.json();
-    localStorage.setItem('token', data.token);
+	localStorage.removeItem('token');
     localStorage.setItem('username', data.username);
     localStorage.setItem('role', data.role);
     return data;
   },
 
-  logout() {
-    localStorage.removeItem('token');
+  async logout() {
+    await apiFetch(`${BASE_URL}/auth/logout`, { method: 'POST' }).catch(() => undefined);
+	localStorage.removeItem('token');
     localStorage.removeItem('username');
     localStorage.removeItem('role');
   },
@@ -280,7 +355,7 @@ export const api = {
 
   async getNamespaces(clusterId: string): Promise<string[]> {
     const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/namespaces`, { headers: getHeaders() });
-    if (!res.ok) return ['default'];
+    if (!res.ok) return [];
     return res.json();
   },
 
@@ -412,6 +487,12 @@ export const api = {
   },
 
   // InfluxDB telemetry runs
+  async getInfluxStatus(): Promise<{ configured: boolean }> {
+    const res = await apiFetch(`${BASE_URL}/influx/status`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Failed to fetch InfluxDB status');
+    return res.json();
+  },
+
   async getTestRuns(): Promise<TestRunSummary[]> {
     const res = await apiFetch(`${BASE_URL}/influx/runs`, { headers: getHeaders() });
     if (!res.ok) throw new Error('Failed to fetch test runs');
@@ -664,7 +745,7 @@ export const api = {
       throw new Error(err.error || 'SSO token exchange failed');
     }
     const data = await res.json();
-    localStorage.setItem('token', data.token);
+	localStorage.removeItem('token');
     localStorage.setItem('username', data.username);
     localStorage.setItem('role', data.role);
     return data;
@@ -834,6 +915,92 @@ export const api = {
     });
     if (!res.ok) throw new Error('Failed to save run defaults');
   },
+
+  // Guardian multi-agent validation runtime
+  async guardianValidate(req: GuardianValidateRequest): Promise<{ id: string; stream_url: string; subject_type: string }> {
+    const res = await apiFetch(`${BASE_URL}/v1/guardian/validate`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(req),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to start Guardian validation' }));
+      throw new Error(err.error || 'Failed to start Guardian validation');
+    }
+    return res.json();
+  },
+
+  guardianStreamUrl(runId: string): string {
+    return `${BASE_URL}/v1/guardian/runs/${runId}/stream`;
+  },
+
+  async getGuardianRun(runId: string): Promise<{ run: GuardianRun; findings: GuardianFinding[] }> {
+    const res = await apiFetch(`${BASE_URL}/v1/guardian/runs/${runId}`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Failed to fetch Guardian run');
+    return res.json();
+  },
+
+  async listGuardianRuns(limit = 50, offset = 0): Promise<GuardianRun[]> {
+    const res = await apiFetch(`${BASE_URL}/v1/guardian/runs?limit=${limit}&offset=${offset}`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Failed to list Guardian runs');
+    return res.json();
+  },
+
+  async overrideGuardianRun(runId: string, note: string): Promise<void> {
+    const res = await apiFetch(`${BASE_URL}/v1/guardian/runs/${runId}/override`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ note }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to override Guardian verdict' }));
+      throw new Error(err.error || 'Failed to override Guardian verdict');
+    }
+  },
+
+  // Fleet dashboard
+  async getFleetSummary(): Promise<FleetSummary> {
+    const res = await apiFetch(`${BASE_URL}/v1/fleet/summary`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Failed to fetch fleet summary');
+    return res.json();
+  },
+
+  // Audit trail
+  async getAuditLogs(limit = 100, offset = 0): Promise<AuditLogEntry[]> {
+    const res = await apiFetch(`${BASE_URL}/v1/audit-logs?limit=${limit}&offset=${offset}`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Failed to fetch audit logs');
+    return res.json();
+  },
+
+  // AWS EKS Auto-Discovery
+  async getEKSDiscoveryConfig(): Promise<any> {
+    const res = await apiFetch(`${BASE_URL}/settings/eks-discovery`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Failed to fetch EKS Discovery config');
+    return res.json();
+  },
+
+  async discoverEKSClusters(): Promise<any[]> {
+    const res = await apiFetch(`${BASE_URL}/settings/eks-discovery/discover`, {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'EKS discovery failed' }));
+      throw new Error(err.error || 'EKS discovery failed');
+    }
+    return res.json();
+  },
+
+  async syncDiscoveredEKSClusters(clusters: any[]): Promise<{ success: boolean; count: number }> {
+    const res = await apiFetch(`${BASE_URL}/settings/eks-discovery/sync`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(clusters),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Sync failed' }));
+      throw new Error(err.error || 'Sync failed');
+    }
+    return res.json();
+  },
 };
-
-

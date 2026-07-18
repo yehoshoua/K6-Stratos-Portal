@@ -1,0 +1,15 @@
+{
+  "name": "xk6-sql-connection-pool",
+  "template_type": "testrun",
+  "parallelism": 10,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "connection-pool.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// Connection pool stress — many VUs hold DB connections.\n// Env: PG_DSN\nimport sql from 'k6/x/sql';\nimport driver from 'k6/x/sql/driver/postgres';\nimport { check, sleep } from 'k6';\n\nconst db = sql.open(driver, __ENV.PG_DSN || 'postgres://localhost:5432/k6?sslmode=disable');\n\nexport const options = {\n  vus: 20,\n  duration: '2m',\n};\n\nexport function teardown() {\n  db.close();\n}\n\nexport default function () {\n  const rows = sql.query(db, 'SELECT pg_sleep(0.1), 1 AS ok');\n  check(rows, { 'query ok': (r) => r.length > 0 });\n  sleep(0.2);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "sql",
+  "description": "xk6 sql template — connection-pool.js"
+}

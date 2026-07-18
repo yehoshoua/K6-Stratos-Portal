@@ -1,0 +1,15 @@
+{
+  "name": "xk6-http-websocket",
+  "template_type": "testrun",
+  "parallelism": 5,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "websocket.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// WebSocket — maintain connections under load.\n// Env: WS_URL (e.g. wss://example.com/ws)\nimport ws from 'k6/ws';\nimport { check } from 'k6';\n\nconst WS_URL = __ENV.WS_URL || 'wss://test.k6.io/ws';\n\nexport const options = {\n  vus: 10,\n  duration: '2m',\n  thresholds: { checks: ['rate>0.95'] },\n};\n\nexport default function () {\n  const res = ws.connect(WS_URL, {}, function (socket) {\n    socket.on('open', () => {\n      socket.send(JSON.stringify({ type: 'ping' }));\n    });\n    socket.on('message', (msg) => {\n      check(msg, { 'message received': (m) => m.length > 0 });\n      socket.close();\n    });\n    socket.setTimeout(() => socket.close(), 10000);\n  });\n  check(res, { 'ws status 101': (r) => r && r.status === 101 });\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "http",
+  "description": "xk6 http template — websocket.js"
+}

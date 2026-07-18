@@ -1,0 +1,20 @@
+{
+  "name": "nightly-soak",
+  "template_type": "cronjob",
+  "scriptName": "k6-scripts",
+  "scriptFile": "soak.js",
+  "cpuLimit": "500m",
+  "memLimit": "512Mi",
+  "useArguments": true,
+  "argumentsText": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "imageUrl": "107435627496.dkr.ecr.us-east-1.amazonaws.com/rem-apps/xk6:v1.1",
+  "schedule": {
+    "cron_expression": "0 2 * * *",
+    "namespace": "loadtest",
+    "active": true
+  },
+  "env": {
+    "BASE_URL": "https://my-service.loadtest.svc.cluster.local",
+    "SOAK_DURATION": "4h"
+  }
+}

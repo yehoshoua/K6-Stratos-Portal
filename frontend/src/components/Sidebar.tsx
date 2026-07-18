@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { 
   LayoutDashboard, 
-  Layers, 
+  Activity,
   BarChart3, 
   LogOut, 
   User, 
@@ -15,24 +15,26 @@ import {
   Moon,
   Monitor,
   Globe,
-  Clock,
+  ChevronDown,
   PanelLeftClose,
   PanelLeftOpen
 } from 'lucide-react';
 import { api } from '@/services/api';
 import { usePreferences, Language, Theme } from './PreferencesContext';
+import { getK6WorkspaceCopy } from '@/i18n/k6Workspace';
 
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { lang, theme, setLang, setTheme, t } = usePreferences();
+  const k6Copy = getK6WorkspaceCopy(lang);
   
   const [username, setUsername] = React.useState('Admin');
   const [role, setRole] = React.useState('administrator');
   const [collapsed, setCollapsed] = React.useState(false);
 
   React.useEffect(() => {
-    if (typeof window !== 'undefined') {
+    const timer = window.setTimeout(() => {
       const storedUser = localStorage.getItem('username');
       const storedRole = localStorage.getItem('role');
       if (storedUser) setUsername(storedUser);
@@ -41,13 +43,13 @@ export default function Sidebar() {
       if (storedCollapsed !== null) {
         setCollapsed(storedCollapsed === 'true');
       }
-    }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   const menuItems = [
     { name: t('dashboard'), href: '/', icon: LayoutDashboard },
-    { name: t('crdControl'), href: '/crds', icon: Layers },
-    { name: t('schedules'), href: '/schedules', icon: Clock },
+    { name: k6Copy.title, href: '/tests', icon: Activity },
     { name: t('k8sClusters'), href: '/clusters', icon: HardDrive },
     { name: t('influxdb'), href: '/metrics', icon: BarChart3 },
   ];
@@ -105,7 +107,7 @@ export default function Sidebar() {
         {/* Navigation Menu */}
         <nav className={`p-4 space-y-1 ${collapsed ? 'items-center' : ''}`}>
           {menuItems.map((item) => {
-            const isActive = pathname === item.href;
+            const isActive = pathname === item.href || (item.href === '/tests' && (pathname === '/crds' || pathname === '/schedules'));
             const Icon = item.icon;
             return (
               <Link
@@ -148,23 +150,21 @@ export default function Sidebar() {
                 <Globe className="w-3.5 h-3.5" />
                 <span>{t('lang')}</span>
               </span>
-              <div className="flex bg-slate-900 p-0.5 rounded-lg border border-slate-800 gap-0.5">
-                {[
-                  { code: 'en', label: 'EN' },
-                  { code: 'fr', label: 'FR' },
-                  { code: 'he', label: 'עב' },
-                  { code: 'zh', label: '中' }
-                ].map((l) => (
-                  <button
-                    key={l.code}
-                    onClick={() => setLang(l.code as Language)}
-                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition cursor-pointer ${
-                      lang === l.code ? 'bg-slate-800 text-white border border-purple-500/20' : 'text-slate-500 hover:text-slate-350'
-                    }`}
-                  >
-                    {l.label}
-                  </button>
-                ))}
+              <div className="relative">
+                <select
+                  value={lang}
+                  onChange={(event) => setLang(event.target.value as Language)}
+                  aria-label={t('lang')}
+                  className="appearance-none bg-slate-900 border border-slate-800 rounded-lg py-1 pl-2 pr-6 text-[10px] font-bold text-slate-200 cursor-pointer outline-none focus:border-purple-500/60"
+                >
+                  <option value="en">English</option>
+                  <option value="fr">Français</option>
+                  <option value="es">Español</option>
+                  <option value="de">Deutsch</option>
+                  <option value="he">עברית</option>
+                  <option value="zh">中文</option>
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 w-3 h-3 -translate-y-1/2 text-slate-500" />
               </div>
             </div>
 

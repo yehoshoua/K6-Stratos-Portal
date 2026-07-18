@@ -1,0 +1,15 @@
+{
+  "name": "xk6-aws-sqs-send-receive",
+  "template_type": "testrun",
+  "parallelism": 2,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "sqs-send-receive.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// SQS send message (receive requires long-polling setup).\n// Env: AWS_REGION, SQS_QUEUE_URL\nimport { AWSConfig, SQSClient } from '/jslibs/aws/sqs.js';\nimport { check, sleep } from 'k6';\nimport { randomString } from 'https://jslib.k6.io/k6-utils/1.4.0/index.js';\n\nconst aws = new AWSConfig({ region: __ENV.AWS_REGION || 'us-east-1' });\nconst sqs = new SQSClient(aws);\nconst queueUrl = __ENV.SQS_QUEUE_URL || 'https://sqs.us-east-1.amazonaws.com/123456789012/my-queue';\n\nexport const options = { vus: 5, duration: '2m' };\n\nexport default function () {\n  const body = JSON.stringify({ id: randomString(8), vu: __VU, iter: __ITER });\n  const res = sqs.sendMessage(queueUrl, body);\n  check(res, { 'message sent': (r) => !r.error });\n  sleep(0.5);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "aws",
+  "description": "xk6 aws template — sqs-send-receive.js"
+}

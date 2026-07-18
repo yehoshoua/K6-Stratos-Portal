@@ -8,9 +8,10 @@ services:
       - "8080:8080"
     environment:
       - PORT=8080
+      - APP_ENV=production
       - DATABASE_PATH=/data/dashboard.db
-      - JWT_SECRET=supersecretjwtsecretkeyshouldbechangedinprod123!
-      - ENCRYPTION_KEY=dGhpcy1pcy1hLTMyLWJ5dGUtZGV2ZWxvcG1lbnQta2V5MSE=
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in your environment}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in your environment}
     volumes:
       - /Users/yehoshouad/.k6-bedrock-dashboard:/data
     restart: unless-stopped

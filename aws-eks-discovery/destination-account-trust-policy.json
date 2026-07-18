@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::<PORTAL_AWS_ACCOUNT_ID>:role/<PORTAL_BACKEND_ROLE_NAME>"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "StratosEKSDiscoveryExternalID"
+        }
+      },
+      "Comment": "Trust policy allowing the Stratos Portal role from the central management account to assume this role with an optional External ID for security."
+    }
+  ]
+}

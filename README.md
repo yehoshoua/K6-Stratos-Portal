@@ -116,7 +116,7 @@ K6 Stratos is a full-stack web application that gives your team a single pane of
 - Create and save custom palettes with a colour picker
 
 #### 🌐 Multilingual UI
-- **English**, **French**, **Hebrew**, **Chinese** — switch without reload
+- **English**, **French**, **Spanish**, **German**, **Hebrew**, **Chinese** — switch without reload, full RTL support for Hebrew
 
 ---
 

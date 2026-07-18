@@ -1,0 +1,15 @@
+{
+  "name": "xk6-aws-eventbridge-put-events",
+  "template_type": "testrun",
+  "parallelism": 2,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "eventbridge-put-events.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// EventBridge PutEvents.\n// Env: AWS_REGION, EVENT_BUS_NAME, EVENT_SOURCE, EVENT_DETAIL_TYPE\nimport { AWSConfig, EventBridgeClient } from '/jslibs/aws/event-bridge.js';\nimport { check, sleep } from 'k6';\n\nconst aws = new AWSConfig({ region: __ENV.AWS_REGION || 'us-east-1' });\nconst eb = new EventBridgeClient(aws);\n\nexport const options = { vus: 3, duration: '2m' };\n\nexport default function () {\n  const entries = [{\n    EventBusName: __ENV.EVENT_BUS_NAME || 'default',\n    Source: __ENV.EVENT_SOURCE || 'k6.loadtest',\n    DetailType: __ENV.EVENT_DETAIL_TYPE || 'LoadTestEvent',\n    Detail: JSON.stringify({ vu: __VU, iter: __ITER }),\n  }];\n  const res = eb.putEvents(entries);\n  check(res, { 'events accepted': (r) => !r.error && r.failedEntryCount === 0 });\n  sleep(0.5);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "aws",
+  "description": "xk6 aws template — eventbridge-put-events.js"
+}

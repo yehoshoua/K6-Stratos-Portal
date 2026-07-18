@@ -1,0 +1,12 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StratosPortalAllowAssumeRole",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/StratosEKSDiscoveryRole",
+      "Comment": "Allows the Stratos Portal backend to assume the discovery role in target/destination AWS accounts."
+    }
+  ]
+}

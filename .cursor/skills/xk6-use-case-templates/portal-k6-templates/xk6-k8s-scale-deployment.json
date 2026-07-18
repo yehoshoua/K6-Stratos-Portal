@@ -1,0 +1,15 @@
+{
+  "name": "xk6-k8s-scale-deployment",
+  "template_type": "testrun",
+  "parallelism": 1,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "scale-deployment.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// Scale deployment replicas during a test.\n// Env: TARGET_NAMESPACE, DEPLOYMENT_NAME, TARGET_REPLICAS\nimport { Kubernetes } from 'k6/x/kubernetes';\nimport { sleep } from 'k6';\n\nconst NS = __ENV.TARGET_NAMESPACE || 'default';\nconst DEPLOY = __ENV.DEPLOYMENT_NAME || 'myapp';\nconst REPLICAS = parseInt(__ENV.TARGET_REPLICAS || '3', 10);\n\nconst k8s = new Kubernetes();\n\nexport const options = {\n  vus: 1,\n  iterations: 1,\n};\n\nexport default function () {\n  k8s.deployments.scale(NS, DEPLOY, REPLICAS);\n  sleep(60);\n  k8s.deployments.scale(NS, DEPLOY, 1);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "k8s",
+  "description": "xk6 k8s template — scale-deployment.js"
+}

@@ -26,6 +26,11 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
+  # Leader election lease for the schedule runner singleton worker when
+  # running with replicas > 1 (see .cursor/rules/backend-ha-leader-election.mdc)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -82,6 +87,8 @@ spec:
           env:
             - name: PORT
               value: "8080"
+            - name: APP_ENV
+              value: "production"
             - name: DATABASE_PATH
               value: "/data/dashboard.db"
             - name: JWT_SECRET
@@ -94,6 +101,38 @@ spec:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: encryption-key
+            # Leader election identity (see internal/leader) — required
+            # once replicas > 1
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Guardian multi-agent validation runtime. Requires the pod's
+            # IRSA role to allow bedrock:InvokeModel; set
+            # GUARDIAN_ENABLED=false to fall back to deterministic-only
+            # validation with no AWS Bedrock dependency at all.
+            - name: GUARDIAN_ENABLED
+              value: "true"
+            - name: BEDROCK_MODEL_ID
+              value: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+            - name: AWS_REGION
+              value: "us-east-1"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
           volumeMounts:
             - name: sqlite-storage
               mountPath: /data
@@ -186,4 +225,3 @@ spec:
                 name: k6-stratum-portal-frontend-service
                 port:
                   number: 80
-

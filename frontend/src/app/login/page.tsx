@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { Lock, User, ShieldAlert, KeyRound, ArrowRight, Sun, Moon, Monitor, Globe } from 'lucide-react';
+import { Lock, User, ShieldAlert, KeyRound, ArrowRight, Sun, Moon, Monitor, Globe, ChevronDown } from 'lucide-react';
 import { api } from '@/services/api';
 import { usePreferences, Theme, Language } from '@/components/PreferencesContext';
 
@@ -148,24 +148,21 @@ export default function LoginPage() {
         </div>
         <div className="flex items-center gap-1 bg-slate-900/40 backdrop-blur-md px-2 py-1 rounded-2xl border border-slate-800/80 shadow-lg">
           <Globe className="w-3.5 h-3.5 text-slate-500" />
-          <div className="flex bg-slate-900/60 p-0.5 rounded-xl border border-slate-800 gap-0.5">
-            {[
-              { code: 'en', label: 'EN' },
-              { code: 'fr', label: 'FR' },
-              { code: 'he', label: 'עב' },
-              { code: 'zh', label: '中' }
-            ].map((l) => (
-              <button
-                key={l.code}
-                onClick={() => setLang(l.code as Language)}
-                title={t('lang')}
-                className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition cursor-pointer ${
-                  lang === l.code ? 'bg-slate-800 text-white border border-purple-500/20' : 'text-slate-500 hover:text-slate-300'
-                }`}
-              >
-                {l.label}
-              </button>
-            ))}
+          <div className="relative">
+            <select
+              value={lang}
+              onChange={(event) => setLang(event.target.value as Language)}
+              aria-label={t('lang')}
+              className="appearance-none bg-slate-900/60 border border-slate-800 rounded-xl py-1 pl-2 pr-6 text-[10px] font-bold text-slate-200 cursor-pointer outline-none focus:border-purple-500/60"
+            >
+              <option value="en">English</option>
+              <option value="fr">Français</option>
+              <option value="es">Español</option>
+              <option value="de">Deutsch</option>
+              <option value="he">עברית</option>
+              <option value="zh">中文</option>
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 w-3 h-3 -translate-y-1/2 text-slate-500" />
           </div>
         </div>
       </div>

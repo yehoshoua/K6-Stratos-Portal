@@ -1,0 +1,15 @@
+{
+  "name": "xk6-aws-ssm-get-parameter",
+  "template_type": "job",
+  "parallelism": 0,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "ssm-get-parameter.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "250m",
+  "mem_limit": "256Mi",
+  "script_content": "// SSM GetParameter — watch AWS API rate limits.\n// Env: AWS_REGION, SSM_PARAMETER_NAME\nimport { AWSConfig, SSMClient } from '/jslibs/aws/ssm.js';\nimport { check, sleep } from 'k6';\n\nconst aws = new AWSConfig({ region: __ENV.AWS_REGION || 'us-east-1' });\nconst ssm = new SSMClient(aws);\nconst name = __ENV.SSM_PARAMETER_NAME || '/myapp/config/url';\n\nexport const options = { vus: 2, duration: '1m' };\n\nexport default function () {\n  const res = ssm.getParameter(name, true);\n  check(res, { 'param fetched': (r) => !r.error && r.parameter });\n  sleep(1);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "aws",
+  "description": "xk6 aws template — ssm-get-parameter.js"
+}

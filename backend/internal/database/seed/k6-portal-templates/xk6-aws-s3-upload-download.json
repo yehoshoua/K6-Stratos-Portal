@@ -1,0 +1,15 @@
+{
+  "name": "xk6-aws-s3-upload-download",
+  "template_type": "testrun",
+  "parallelism": 3,
+  "script_name": "xk6-use-case-scripts",
+  "script_file": "s3-upload-download.js",
+  "runner_image": "rem-helm-images/rem-apps/xk6:latest",
+  "cpu_limit": "500m",
+  "mem_limit": "512Mi",
+  "script_content": "// S3 upload and download under load.\n// Env: AWS_REGION, S3_BUCKET, S3_KEY_PREFIX\nimport { AWSConfig, S3Client } from '/jslibs/aws/s3.js';\nimport { check, sleep } from 'k6';\nimport { randomString } from 'https://jslib.k6.io/k6-utils/1.4.0/index.js';\n\nconst aws = new AWSConfig({ region: __ENV.AWS_REGION || 'us-east-1' });\nconst s3 = new S3Client(aws);\nconst bucket = __ENV.S3_BUCKET || 'my-bucket';\nconst prefix = __ENV.S3_KEY_PREFIX || 'k6-load/';\n\nexport const options = { vus: 3, duration: '2m' };\n\nexport default function () {\n  const key = `${prefix}${randomString(8)}.txt`;\n  const body = `k6-vu-${__VU}-iter-${__ITER}`;\n\n  const putRes = s3.putObject(bucket, key, body);\n  check(putRes, { 'put ok': (r) => !r.error });\n\n  const getRes = s3.getObject(bucket, key);\n  check(getRes, { 'get ok': (r) => !r.error && r.body && r.body.includes('k6-vu') });\n\n  sleep(1);\n}\n",
+  "output_args": "--out influxdb=http://grafana-hub-influxdb.grafana-hub.svc.cluster.local:8086/k6s",
+  "use_output": true,
+  "category": "aws",
+  "description": "xk6 aws template — s3-upload-download.js"
+}

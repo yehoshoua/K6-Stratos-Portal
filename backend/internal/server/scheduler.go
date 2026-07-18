@@ -41,25 +41,52 @@ type scheduleState struct {
 	nextRun  time.Time
 }
 
-func (s *Server) startScheduleRunner() {
+// RunAsLeader starts every leader-only singleton background worker
+// (currently just the schedule runner) and returns a stop function that
+// blocks until they have all exited cleanly. Call it from
+// leaderelection's OnStartedLeading callback; call the returned stop
+// function from OnStoppedLeading before returning, so a demoted replica
+// never has a stale ticker still writing to the database.
+func (s *Server) RunAsLeader(ctx context.Context) (stop func()) {
+	log.Printf("leader: elected — starting schedule runner")
+	return s.startScheduleRunner(ctx)
+}
+
+// startScheduleRunner launches the cron polling loop. It is a leader-only
+// singleton worker per backend-ha-leader-election.mdc: running it on
+// every replica of a multi-replica deployment would double-fire
+// schedules. The returned stop function blocks until the ticker
+// goroutine has actually exited, so OnStoppedLeading can safely hand
+// leadership back without a lingering duplicate writer.
+func (s *Server) startScheduleRunner(ctx context.Context) (stop func()) {
 	if s.db == nil {
-		return
+		return func() {}
 	}
 
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	states := map[int]*scheduleState{}
 	templateStates := map[string]*scheduleState{}
 	ticker := time.NewTicker(scheduleTickInterval)
+	done := make(chan struct{})
 
 	s.processSchedules(parser, states)
 	s.processTemplateSchedules(parser, templateStates)
 
 	go func() {
-		for range ticker.C {
-			s.processSchedules(parser, states)
-			s.processTemplateSchedules(parser, templateStates)
+		defer close(done)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.processSchedules(parser, states)
+				s.processTemplateSchedules(parser, templateStates)
+			}
 		}
 	}()
+
+	return func() { <-done }
 }
 
 func (s *Server) processSchedules(parser cron.Parser, states map[int]*scheduleState) {
