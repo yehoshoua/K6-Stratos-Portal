@@ -226,12 +226,14 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/k8s/clusters/{id}", s.authMiddleware(s.adminOnly(s.handleUpdateCluster)))
 	mux.HandleFunc("DELETE /api/k8s/clusters/{id}", s.authMiddleware(s.adminOnly(s.handleDeleteCluster)))
 	mux.HandleFunc("GET /api/k8s/clusters/{id}/namespaces", s.authMiddleware(s.handleListNamespaces))
+	mux.HandleFunc("GET /api/k8s/clusters/{id}/addons", s.authMiddleware(s.handleGetClusterAddons))
 
 	// AWS EKS Discovery endpoints
 	mux.HandleFunc("GET /api/settings/eks-discovery", s.authMiddleware(s.adminOnly(s.handleGetEKSDiscoveryConfig)))
 	mux.HandleFunc("POST /api/settings/eks-discovery/discover", s.authMiddleware(s.adminOnly(s.handleDiscoverEKSClusters)))
 	mux.HandleFunc("POST /api/settings/eks-discovery/sync", s.authMiddleware(s.adminOnly(s.handleSyncDiscoveredEKSClusters)))
 	mux.HandleFunc("GET /api/k8s/clusters/{id}/ecr/check", s.authMiddleware(s.handleCheckECRRepo))
+	mux.HandleFunc("GET /api/k8s/clusters/{id}/resolve-image", s.authMiddleware(s.handleResolveClusterImage))
 	mux.HandleFunc("GET /api/k8s/local-contexts", s.authMiddleware(s.adminOnly(s.handleListLocalContexts)))
 	mux.HandleFunc("GET /api/k8s/operator-status", s.authMiddleware(s.handleGetOperatorStatus))
 	mux.HandleFunc("GET /api/k8s/active-tests", s.authMiddleware(s.handleGetActiveTests))

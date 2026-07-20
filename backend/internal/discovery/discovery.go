@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -20,6 +21,7 @@ type DiscoveredCluster struct {
 	APIServerURL string `json:"api_server_url"`
 	CACertBase64 string `json:"ca_cert_base64"`
 	AWSAccountID string `json:"aws_account_id"`
+	ARN          string `json:"arn"`
 	Region       string `json:"region"`
 	RoleARN      string `json:"role_arn"`
 }
@@ -158,12 +160,19 @@ func DiscoverEKSClusters(ctx context.Context, accounts []AWSAccountConfig, exter
 
 					log.Printf("[AWS Discovery] [SUCCESS] Found active EKS Cluster: %s in account %s, region %s", name, accountID, region)
 
+					clusterARN := aws.ToString(cluster.Arn)
+					resolvedAccountID := AccountIDFromARN(clusterARN)
+					if resolvedAccountID == "" {
+						resolvedAccountID = accountID
+					}
+
 					mu.Lock()
 					discovered = append(discovered, DiscoveredCluster{
 						Name:         name,
 						APIServerURL: aws.ToString(cluster.Endpoint),
 						CACertBase64: aws.ToString(cluster.CertificateAuthority.Data),
-						AWSAccountID: accountID,
+						AWSAccountID: resolvedAccountID,
+						ARN:          clusterARN,
 						Region:       region,
 						RoleARN:      arn,
 					})
@@ -175,4 +184,93 @@ func DiscoverEKSClusters(ctx context.Context, accounts []AWSAccountConfig, exter
 
 	wg.Wait()
 	return discovered, nil
+}
+
+// LookupClusterAWSAccount resolves the AWS account that owns an EKS cluster by
+// matching its API server endpoint against clusters discovered via
+// AWS_ACCOUNTS_DISCOVERY.
+func LookupClusterAWSAccount(ctx context.Context, clusterName, apiServerURL, externalID string, accounts []AWSAccountConfig) string {
+	clusterName = strings.TrimSpace(clusterName)
+	apiServerURL = strings.TrimSpace(apiServerURL)
+	if clusterName == "" || apiServerURL == "" || len(accounts) == 0 {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+
+	baseCfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return ""
+	}
+	stsClient := sts.NewFromConfig(baseCfg)
+
+	for _, acc := range accounts {
+		roleARN := fmt.Sprintf("arn:aws:iam::%s:role/StratosEKSDiscoveryRole", acc.AccountID)
+		for _, region := range acc.Regions {
+			assumeInput := &sts.AssumeRoleInput{
+				RoleArn:         aws.String(roleARN),
+				RoleSessionName: aws.String("stratos-eks-account-lookup"),
+				DurationSeconds: aws.Int32(900),
+			}
+			if externalID != "" {
+				assumeInput.ExternalId = aws.String(externalID)
+			}
+
+			assumed, err := stsClient.AssumeRole(ctx, assumeInput)
+			if err != nil {
+				continue
+			}
+
+			assumedCfg, err := awsconfig.LoadDefaultConfig(ctx,
+				awsconfig.WithRegion(region),
+				awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+					aws.ToString(assumed.Credentials.AccessKeyId),
+					aws.ToString(assumed.Credentials.SecretAccessKey),
+					aws.ToString(assumed.Credentials.SessionToken),
+				)),
+			)
+			if err != nil {
+				continue
+			}
+
+			descOut, err := eks.NewFromConfig(assumedCfg).DescribeCluster(ctx, &eks.DescribeClusterInput{
+				Name: aws.String(clusterName),
+			})
+			if err != nil || descOut.Cluster == nil {
+				continue
+			}
+			if aws.ToString(descOut.Cluster.Endpoint) != apiServerURL {
+				continue
+			}
+			if arn := aws.ToString(descOut.Cluster.Arn); arn != "" {
+				if accountID := AccountIDFromARN(arn); accountID != "" {
+					return accountID
+				}
+			}
+			return acc.AccountID
+		}
+	}
+	return ""
+}
+
+func AccountIDFromARN(arn string) string {
+	arn = strings.TrimSpace(arn)
+	if !strings.HasPrefix(arn, "arn:") {
+		return ""
+	}
+	parts := strings.Split(arn, ":")
+	if len(parts) < 5 {
+		return ""
+	}
+	accountID := strings.TrimSpace(parts[4])
+	if len(accountID) != 12 {
+		return ""
+	}
+	for _, r := range accountID {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return accountID
 }

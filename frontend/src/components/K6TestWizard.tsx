@@ -19,6 +19,11 @@ import { usePreferences } from "@/components/PreferencesContext";
 import { getK6WorkspaceCopy } from "@/i18n/k6Workspace";
 import { api, ClusterConfig, K6Template, RunDefaults } from "@/services/api";
 import { isValidCron, nextCronOccurrences } from "@/utils/k6Operations";
+import {
+  clusterImageContext,
+  defaultRunnerImage,
+  resolveClusterImage,
+} from "@/utils/clusterImage";
 
 interface K6TestWizardProps {
   open: boolean;
@@ -30,6 +35,24 @@ interface K6TestWizardProps {
 
 type SchedulePreset = "daily" | "weekly" | "monthly" | "custom";
 type LaunchKind = "testrun" | "job";
+
+export function extractEnvVarsFromScript(script: string): string[] {
+  const envVars = new Set<string>();
+  if (!script) return [];
+
+  const dotRegex = /__ENV\.([a-zA-Z_][a-zA-Z0-9_]*)/g;
+  const bracketRegex = /__ENV\s*\[\s*["']([a-zA-Z_][a-zA-Z0-9_]*)["']\s*\]/g;
+
+  let match;
+  while ((match = dotRegex.exec(script)) !== null) {
+    envVars.add(match[1]);
+  }
+  while ((match = bracketRegex.exec(script)) !== null) {
+    envVars.add(match[1]);
+  }
+
+  return Array.from(envVars);
+}
 
 const FALLBACK_SCRIPT = `import http from 'k6/http';
 import { check, sleep } from 'k6';
@@ -88,6 +111,7 @@ export default function K6TestWizard({
   const [memory, setMemory] = useState("512Mi");
   const [image, setImage] = useState("");
   const [output, setOutput] = useState("");
+  const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>([]);
   const [action, setAction] = useState<"now" | "schedule">(initialAction);
   const [launchKind, setLaunchKind] = useState<LaunchKind>("testrun");
   const [preset, setPreset] = useState<SchedulePreset>("daily");
@@ -101,6 +125,10 @@ export default function K6TestWizard({
 
   const selectedTemplate = templates.find(
     (template) => template.id === templateId,
+  );
+  const selectedCluster = useMemo(
+    () => clusters.find((cluster) => cluster.id === clusterId),
+    [clusters, clusterId],
   );
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const cron = useMemo(() => {
@@ -125,11 +153,20 @@ export default function K6TestWizard({
   ];
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setClusterId("");
+      setNamespace("");
+      setNamespaces([]);
+      return;
+    }
+
     const timer = window.setTimeout(() => {
       setStep(0);
       setError("");
       setAction(initialAction);
+      setClusterId("");
+      setNamespace("");
+      setNamespaces([]);
       setLoading(true);
       Promise.all([
         api.getClusters(),
@@ -143,16 +180,19 @@ export default function K6TestWizard({
         })),
       ])
         .then(([clusterData, templateData, defaultData]) => {
-          const availableClusters = (clusterData || []).filter(
-            (cluster) => cluster.k6_operator_installed !== false,
-          );
+          const availableClusters = clusterData || [];
           setClusters(availableClusters);
           setTemplates(templateData || []);
           setDefaults(defaultData);
+          setEnvVars(defaultData.env_vars || []);
           setOutput(defaultData.use_output ? defaultData.output_args : "");
           setImage(defaultData.use_image ? defaultData.image_url : "");
-          if (availableClusters[0]) setClusterId(availableClusters[0].id);
-          if (templateData[0]) applyTemplate(templateData[0]);
+          if (availableClusters[0]) {
+            setClusterId(availableClusters[0].id);
+          }
+          if (templateData[0]) {
+            applyTemplate(templateData[0], defaultData.env_vars);
+          }
         })
         .catch((reason) =>
           setError(reason instanceof Error ? reason.message : copy.loadError),
@@ -161,6 +201,15 @@ export default function K6TestWizard({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [copy.loadError, initialAction, open]);
+
+  useEffect(() => {
+    if (!open || clusters.length === 0) return;
+    setClusterId((current) =>
+      clusters.some((cluster) => cluster.id === current)
+        ? current
+        : clusters[0].id,
+    );
+  }, [clusters, open]);
 
   useEffect(() => {
     if (!clusterId || !open) return;
@@ -179,23 +228,89 @@ export default function K6TestWizard({
       });
   }, [clusterId, open]);
 
-  function applyTemplate(template: K6Template) {
+  useEffect(() => {
+    if (parallelism > 1) {
+      setLaunchKind("testrun");
+    } else {
+      setLaunchKind("job");
+    }
+  }, [parallelism]);
+
+  useEffect(() => {
+    if (!script) return;
+    const scriptEnvKeys = extractEnvVarsFromScript(script);
+    setEnvVars((prev) => {
+      let changed = false;
+      const next = [...prev];
+      scriptEnvKeys.forEach((key) => {
+        if (!next.some((ev) => ev.key === key)) {
+          next.push({ key, value: "" });
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [script]);
+
+  function applyTemplate(template: K6Template, defaultEnvVars?: { key: string; value: string }[]) {
     setTemplateId(template.id);
     setName((current) => current || sanitizeK8sName(template.name));
-    setScript(template.script_content || FALLBACK_SCRIPT);
+    const scriptContent = template.script_content || FALLBACK_SCRIPT;
+    setScript(scriptContent);
     setParallelism(template.parallelism || 1);
     setCpu(template.cpu_limit || "500m");
     setMemory(template.mem_limit || "512Mi");
     setImage(template.runner_image || "");
-    if (template.template_type === "job") setLaunchKind("job");
-    else setLaunchKind("testrun");
+
+    const baseEnvs = defaultEnvVars || defaults.env_vars || [];
+    const scriptEnvKeys = extractEnvVarsFromScript(scriptContent);
+    const merged = [...baseEnvs];
+    scriptEnvKeys.forEach(key => {
+      if (!merged.some(ev => ev.key === key)) {
+        merged.push({ key, value: "" });
+      }
+    });
+    setEnvVars(merged);
   }
+
+  const handleStepClick = (targetStep: number) => {
+    if (targetStep === step) return;
+    setError("");
+
+    if (targetStep < step) {
+      setStep(targetStep);
+      return;
+    }
+
+    let tempStep = step;
+    while (tempStep < targetStep) {
+      if (tempStep === 0 && !templateId) {
+        setError(copy.required);
+        return;
+      }
+      if (tempStep === 1 && (!clusterId || !namespace || !name.trim())) {
+        setError(copy.required);
+        return;
+      }
+      if (tempStep === 2 && !script.trim()) {
+        setError(copy.required);
+        return;
+      }
+      if (tempStep === 3 && parallelism < 1) {
+        setError(copy.required);
+        return;
+      }
+      tempStep++;
+    }
+    setStep(targetStep);
+  };
 
   const validateStep = () => {
     if (step === 0 && !templateId) return copy.required;
     if (step === 1 && (!clusterId || !namespace || !name.trim()))
       return copy.required;
-    if (step === 2 && (!script.trim() || parallelism < 1)) return copy.required;
+    if (step === 2 && !script.trim()) return copy.required;
+    if (step === 3 && parallelism < 1) return copy.required;
     if (step === 4 && action === "schedule" && !isValidCron(cron))
       return copy.invalidCron;
     return "";
@@ -211,10 +326,20 @@ export default function K6TestWizard({
     setStep((current) => Math.min(5, current + 1));
   };
 
-  const buildPayload = (validationRunId?: string) => {
+  const buildPayload = (validationRunId?: string, resolvedRunnerImage?: string) => {
     const resourceKind = action === "schedule" ? "cronjob" : launchKind;
     const scriptName =
       selectedTemplate?.script_name || `${sanitizeK8sName(name)}-script`;
+    const rawRunnerImage =
+      image.trim() ||
+      (defaults.use_image ? defaults.image_url : "") ||
+      selectedTemplate?.runner_image ||
+      "";
+    const runnerImage =
+      resolvedRunnerImage ||
+      (rawRunnerImage
+        ? resolveClusterImage(rawRunnerImage, clusterImageContext(selectedCluster))
+        : defaultRunnerImage(selectedCluster));
     const payload: Record<string, unknown> = {
       name: sanitizeK8sName(name),
       scriptContent: script,
@@ -230,10 +355,10 @@ export default function K6TestWizard({
         },
         runner: {
           resources: { limits: { cpu, memory } },
-          ...(image.trim() ? { image: image.trim() } : {}),
-          ...(defaults.env_vars.length
+          ...(runnerImage ? { image: runnerImage } : {}),
+          ...(envVars.filter((item) => item.key.trim()).length
             ? {
-                env: defaults.env_vars
+                env: envVars
                   .filter((item) => item.key.trim())
                   .map((item) => ({ name: item.key, value: item.value })),
               }
@@ -260,7 +385,29 @@ export default function K6TestWizard({
     setLoading(true);
     setError("");
     try {
-      await api.createCRD(clusterId, namespace, buildPayload(validationRunId));
+      const rawRunnerImage =
+        image.trim() ||
+        (defaults.use_image ? defaults.image_url : "") ||
+        selectedTemplate?.runner_image ||
+        "";
+      let resolvedRunnerImage = rawRunnerImage
+        ? resolveClusterImage(rawRunnerImage, clusterImageContext(selectedCluster))
+        : defaultRunnerImage(selectedCluster);
+      if (clusterId) {
+        try {
+          resolvedRunnerImage = await api.resolveClusterImage(
+            clusterId,
+            rawRunnerImage || resolvedRunnerImage,
+          );
+        } catch {
+          // Fall back to client-side resolution above.
+        }
+      }
+      await api.createCRD(
+        clusterId,
+        namespace,
+        buildPayload(validationRunId, resolvedRunnerImage),
+      );
       setPreflightOpen(false);
       onCreated();
       onClose();
@@ -280,6 +427,7 @@ export default function K6TestWizard({
       `${clusters.find((cluster) => cluster.id === clusterId)?.name || clusterId} / ${namespace}`,
     ],
     [copy.parallelism, String(parallelism)],
+    [copy.type, launchKind === "job" ? "Job" : "TestRun"],
     [
       copy.executionType,
       action === "schedule"
@@ -321,11 +469,23 @@ export default function K6TestWizard({
               return (
                 <li
                   key={item.label}
-                  className={`rounded-xl border px-2 py-2 text-center ${selected ? "border-purple-500/50 bg-purple-500/10 text-purple-200" : complete ? "border-emerald-500/20 text-emerald-400" : "border-slate-800 text-slate-500"}`}
+                  className={`rounded-xl border transition-all duration-300 ${
+                    selected
+                      ? "border-purple-500/50 bg-purple-500/10 text-purple-200"
+                      : complete
+                        ? "border-emerald-500/25 bg-emerald-500/5 text-emerald-400 hover:border-emerald-500/40 hover:bg-emerald-500/10"
+                        : "border-slate-800 text-slate-500 hover:border-slate-700 hover:bg-slate-800/20"
+                  }`}
                   aria-current={selected ? "step" : undefined}
                 >
-                  <Icon className="w-4 h-4 mx-auto mb-1" aria-hidden="true" />
-                  <span className="text-[10px] font-medium">{item.label}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleStepClick(index)}
+                    className="w-full h-full px-2 py-2 text-center focus:outline-none cursor-pointer"
+                  >
+                    <Icon className="w-4 h-4 mx-auto mb-1" aria-hidden="true" />
+                    <span className="text-[10px] font-medium">{item.label}</span>
+                  </button>
                 </li>
               );
             })}
@@ -344,7 +504,9 @@ export default function K6TestWizard({
               {copy.loading}
             </div>
           ) : (
-            <div className="min-h-0 flex-1 overflow-y-auto pr-2">
+            <div
+              className={`min-h-0 flex-1 pr-2 ${step === 1 ? "overflow-visible" : "overflow-y-auto"}`}
+            >
               {step === 0 && (
                 <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   {templates.map((template) => (
@@ -373,33 +535,50 @@ export default function K6TestWizard({
               )}
 
               {step === 1 && (
-                <div className="grid md:grid-cols-2 gap-5 max-w-3xl">
-                  <label className="space-y-2 text-xs text-slate-400">
+                <div className="relative z-20 grid md:grid-cols-2 gap-5 max-w-3xl overflow-visible">
+                  <label className="space-y-2 text-xs text-slate-400" htmlFor="k6-wizard-cluster">
                     <span>{copy.cluster}</span>
                     <select
+                      id="k6-wizard-cluster"
                       value={clusterId}
                       onChange={(event) => setClusterId(event.target.value)}
-                      className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200"
+                      disabled={clusters.length === 0}
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200 disabled:opacity-50"
                     >
-                      {clusters.map((cluster) => (
-                        <option key={cluster.id} value={cluster.id}>
-                          {cluster.name}
-                        </option>
-                      ))}
+                      {clusters.length === 0 ? (
+                        <option value="">{copy.required}</option>
+                      ) : (
+                        clusters.map((cluster) => (
+                          <option key={cluster.id} value={cluster.id}>
+                            {cluster.name}
+                            {cluster.k6_operator_installed === false
+                              ? " (k6 operator missing)"
+                              : ""}
+                          </option>
+                        ))
+                      )}
                     </select>
                   </label>
-                  <label className="space-y-2 text-xs text-slate-400">
+                  <label className="space-y-2 text-xs text-slate-400" htmlFor="k6-wizard-namespace">
                     <span>{copy.namespace}</span>
                     <select
+                      id="k6-wizard-namespace"
                       value={namespace}
                       onChange={(event) => setNamespace(event.target.value)}
-                      className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200"
+                      disabled={!clusterId || namespaces.length === 0}
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200 disabled:opacity-50"
                     >
-                      {namespaces.map((item) => (
-                        <option key={item} value={item}>
-                          {item}
+                      {!clusterId || namespaces.length === 0 ? (
+                        <option value="">
+                          {!clusterId ? copy.cluster : copy.namespace}
                         </option>
-                      ))}
+                      ) : (
+                        namespaces.map((item) => (
+                          <option key={item} value={item}>
+                            {item}
+                          </option>
+                        ))
+                      )}
                     </select>
                   </label>
                   <label className="space-y-2 text-xs text-slate-400 md:col-span-2">
@@ -415,18 +594,6 @@ export default function K6TestWizard({
 
               {step === 2 && (
                 <div className="space-y-4">
-                  <label className="block max-w-xs space-y-2 text-xs text-slate-400">
-                    <span>{copy.parallelism}</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={parallelism}
-                      onChange={(event) =>
-                        setParallelism(Math.max(1, Number(event.target.value)))
-                      }
-                      className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200"
-                    />
-                  </label>
                   {script.includes("stages") && (
                     <K6StagesVisualEditor
                       script={script}
@@ -443,6 +610,64 @@ export default function K6TestWizard({
                       className="w-full rounded-xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-200"
                     />
                   </label>
+
+                  {/* Environment Variables */}
+                  <div className="space-y-3 pt-4 border-t border-slate-800/80">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                        {copy.runDefaultsEnv}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setEnvVars((prev) => [...prev, { key: "", value: "" }])}
+                        className="text-[11px] font-semibold text-purple-400 hover:text-purple-300 transition cursor-pointer"
+                      >
+                        + {copy.runDefaultsEnvAdd}
+                      </button>
+                    </div>
+                    {envVars.length === 0 ? (
+                      <p className="text-[11px] text-slate-500 italic">No environment variables defined.</p>
+                    ) : (
+                      <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                        {envVars.map((item, idx) => (
+                          <div key={idx} className="flex gap-2 items-center">
+                            <input
+                              placeholder="Key"
+                              value={item.key}
+                              onChange={(e) => {
+                                const next = [...envVars];
+                                next[idx] = { ...next[idx], key: e.target.value };
+                                setEnvVars(next);
+                              }}
+                              className="flex-1 rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-200"
+                            />
+                            <input
+                              placeholder="Value"
+                              value={item.value}
+                              onChange={(e) => {
+                                const next = [...envVars];
+                                next[idx] = { ...next[idx], value: e.target.value };
+                                setEnvVars(next);
+                              }}
+                              className="flex-1 rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-200"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEnvVars(envVars.filter((_, i) => i !== idx));
+                              }}
+                              className="p-2 text-slate-500 hover:text-red-400 transition cursor-pointer"
+                              title="Delete"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -454,6 +679,26 @@ export default function K6TestWizard({
                     </p>
                   )}
                   <div className="grid md:grid-cols-2 gap-4">
+                    <label className="space-y-2 text-xs text-slate-400">
+                      <span>{copy.parallelism}</span>
+                      <input
+                        type="number"
+                        min={1}
+                        value={parallelism}
+                        onChange={(event) =>
+                          setParallelism(Math.max(1, Number(event.target.value)))
+                        }
+                        className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200"
+                      />
+                    </label>
+                    <label className="space-y-2 text-xs text-slate-400">
+                      <span>{copy.image}</span>
+                      <input
+                        value={image}
+                        onChange={(event) => setImage(event.target.value)}
+                        className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 font-mono text-slate-200"
+                      />
+                    </label>
                     <label className="space-y-2 text-xs text-slate-400">
                       <span>{copy.cpu}</span>
                       <input
@@ -468,14 +713,6 @@ export default function K6TestWizard({
                         value={memory}
                         onChange={(event) => setMemory(event.target.value)}
                         className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200"
-                      />
-                    </label>
-                    <label className="space-y-2 text-xs text-slate-400 md:col-span-2">
-                      <span>{copy.image}</span>
-                      <input
-                        value={image}
-                        onChange={(event) => setImage(event.target.value)}
-                        className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 font-mono text-slate-200"
                       />
                     </label>
                     <label className="space-y-2 text-xs text-slate-400 md:col-span-2">

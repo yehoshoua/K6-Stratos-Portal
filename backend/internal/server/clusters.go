@@ -56,6 +56,8 @@ func (s *Server) handleRegisterCluster(w http.ResponseWriter, r *http.Request) {
 		CACertBase64 string `json:"ca_cert_base64"`
 		Namespaces   string `json:"namespaces"`     // Comma-separated list of namespaces
 		AWSAccountID string `json:"aws_account_id"` // AWS Account ID for ECR image resolution
+		ClusterARN   string `json:"cluster_arn"`    // Optional EKS cluster ARN
+		Region       string `json:"region"`
 		Environment  string `json:"environment"`    // dev | stage | prod | sandbox
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -106,6 +108,10 @@ func (s *Server) handleRegisterCluster(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := fmt.Sprintf("eks-%d", time.Now().UnixNano())
+	region := strings.TrimSpace(body.Region)
+	if region == "" {
+		region = parseRegion(body.APIServerURL)
+	}
 	newCluster := &ClusterConfig{
 		ID:            id,
 		Name:          body.Name,
@@ -115,7 +121,8 @@ func (s *Server) handleRegisterCluster(w http.ResponseWriter, r *http.Request) {
 		CACertBase64:  body.CACertBase64,
 		CreatedAt:     time.Now(),
 		Namespaces:    body.Namespaces,
-		AWSAccountID:  strings.TrimSpace(body.AWSAccountID),
+		AWSAccountID:  resolveAWSAccountIDFromARN(body.AWSAccountID, body.ClusterARN),
+		Region:        region,
 		Environment:   normalizeEnvironment(body.Environment, body.Name),
 	}
 	s.enrichClusterMetadata(r.Context(), newCluster, false)
@@ -146,6 +153,8 @@ func (s *Server) handleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 		CACertBase64 string `json:"ca_cert_base64"`
 		Namespaces   string `json:"namespaces"`     // Comma-separated list of namespaces
 		AWSAccountID string `json:"aws_account_id"` // AWS Account ID for ECR image resolution
+		ClusterARN   string `json:"cluster_arn"`    // Optional EKS cluster ARN
+		Region       string `json:"region"`
 		Environment  string `json:"environment"`    // dev | stage | prod | sandbox
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -192,13 +201,20 @@ func (s *Server) handleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	awsAccountID := strings.TrimSpace(body.AWSAccountID)
+	awsAccountID := resolveAWSAccountIDFromARN(body.AWSAccountID, body.ClusterARN)
 	if awsAccountID == "" {
 		awsAccountID = existing.AWSAccountID
 	}
 	environment := normalizeEnvironment(body.Environment, "")
 	if environment == "" {
 		environment = existing.Environment
+	}
+	region := strings.TrimSpace(body.Region)
+	if region == "" {
+		region = existing.Region
+	}
+	if region == "" {
+		region = parseRegion(body.APIServerURL)
 	}
 
 	updatedCluster := &ClusterConfig{
@@ -211,7 +227,7 @@ func (s *Server) handleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:     existing.CreatedAt,
 		Namespaces:    body.Namespaces,
 		AWSAccountID:  awsAccountID,
-		Region:        existing.Region,
+		Region:        region,
 		Environment:   environment,
 	}
 	s.enrichClusterMetadata(r.Context(), updatedCluster, false)

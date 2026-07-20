@@ -98,6 +98,7 @@ func (s *Server) handleSyncDiscoveredEKSClusters(w http.ResponseWriter, r *http.
 		APIServerURL string `json:"api_server_url"`
 		CACertBase64 string `json:"ca_cert_base64"`
 		AWSAccountID string `json:"aws_account_id"`
+		ARN          string `json:"arn"`
 		Region       string `json:"region"`
 		RoleARN      string `json:"role_arn"`
 		Environment  string `json:"environment"` // optional custom environment (dev/stage/prod/sandbox)
@@ -127,6 +128,7 @@ func (s *Server) handleSyncDiscoveredEKSClusters(w http.ResponseWriter, r *http.
 		}
 
 		id := fmt.Sprintf("eks-%d", time.Now().UnixNano())
+		awsAccountID := resolveAWSAccountIDFromARN(item.AWSAccountID, item.ARN)
 		newCluster := &ClusterConfig{
 			ID:            id,
 			Name:          item.Name,
@@ -135,8 +137,8 @@ func (s *Server) handleSyncDiscoveredEKSClusters(w http.ResponseWriter, r *http.
 			EncryptedData: encryptedARN,
 			CACertBase64:  item.CACertBase64,
 			CreatedAt:     time.Now(),
-			Namespaces:    "", // Default to empty, let user configure later
-			AWSAccountID:  item.AWSAccountID,
+			Namespaces:    "",
+			AWSAccountID:  awsAccountID,
 			Region:        item.Region,
 			Environment:   normalizeEnvironment(env, item.Name),
 		}

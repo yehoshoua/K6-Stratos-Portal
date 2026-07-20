@@ -105,6 +105,15 @@ export function resolveClusterImage(
     return trimmed;
   }
 
+  const ecrMarker = '.dkr.ecr.';
+  const ecrIndex = trimmed.indexOf(ecrMarker);
+  if (ecrIndex > 0) {
+    const slashIndex = trimmed.indexOf('/', ecrIndex);
+    if (slashIndex > ecrIndex) {
+      trimmed = trimmed.slice(slashIndex + 1);
+    }
+  }
+
   const parts = trimmed.split('/');
   if (
     parts.length > 1 &&

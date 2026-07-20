@@ -6,13 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
+	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+
+	"k6-bedrock-dashboard/backend/internal/discovery"
 )
 
 type ecrCheckResponse struct {
@@ -21,6 +28,25 @@ type ecrCheckResponse struct {
 	Registry   string `json:"registry"`
 	Image      string `json:"image"`
 	Message    string `json:"message,omitempty"`
+}
+
+func (s *Server) handleResolveClusterImage(w http.ResponseWriter, r *http.Request) {
+	clusterID := r.PathValue("id")
+	image := strings.TrimSpace(r.URL.Query().Get("image"))
+	if image == "" {
+		http.Error(w, `{"error":"missing image query param"}`, http.StatusBadRequest)
+		return
+	}
+
+	clusterConfig := s.getClusterConfig(clusterID)
+	if clusterConfig == nil {
+		http.Error(w, `{"error":"cluster not found"}`, http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, map[string]string{
+		"image": resolveClusterImage(image, clusterConfig),
+	})
 }
 
 func (s *Server) handleCheckECRRepo(w http.ResponseWriter, r *http.Request) {
@@ -103,19 +129,131 @@ func writeJSON(w http.ResponseWriter, payload interface{}) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func detectAWSAccountID(ctx context.Context, region string) string {
+func accountIDFromARN(arn string) string {
+	return discovery.AccountIDFromARN(arn)
+}
+
+func resolveAWSAccountIDFromARN(explicitAccountID, clusterARN string) string {
+	if parsed := accountIDFromARN(clusterARN); parsed != "" {
+		return parsed
+	}
+	return strings.TrimSpace(explicitAccountID)
+}
+
+func (s *Server) awsAccountIDFromEKSCluster(ctx context.Context, c *ClusterConfig) string {
+	if c == nil || strings.TrimSpace(c.Name) == "" {
+		return ""
+	}
+
+	region := strings.TrimSpace(c.Region)
+	if region == "" {
+		region = parseRegion(c.APIServerURL)
+	}
 	if region == "" {
 		return ""
 	}
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
-	if err != nil {
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	var awsCfg aws.Config
+	var err error
+
+	switch c.AuthType {
+	case "eks-assume-role":
+		if c.EncryptedData == "" {
+			return ""
+		}
+		decrypted, err := s.config.Decrypt(c.EncryptedData)
+		if err != nil {
+			return ""
+		}
+		roleARN := strings.TrimSpace(string(decrypted))
+		if roleARN == "" {
+			return ""
+		}
+
+		baseCfg, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return ""
+		}
+		assumed, err := sts.NewFromConfig(baseCfg).AssumeRole(ctx, &sts.AssumeRoleInput{
+			RoleArn:         aws.String(roleARN),
+			RoleSessionName: aws.String("stratos-eks-account-resolve"),
+			DurationSeconds: aws.Int32(900),
+		})
+		if err != nil {
+			return ""
+		}
+		awsCfg, err = awsconfig.LoadDefaultConfig(ctx,
+			awsconfig.WithRegion(region),
+			awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+				aws.ToString(assumed.Credentials.AccessKeyId),
+				aws.ToString(assumed.Credentials.SecretAccessKey),
+				aws.ToString(assumed.Credentials.SessionToken),
+			)),
+		)
+		if err != nil {
+			return ""
+		}
+	case "in-cluster":
+		awsCfg, err = awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+		if err != nil {
+			return ""
+		}
+	default:
 		return ""
 	}
-	out, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-	if err != nil || out.Account == nil {
+
+	out, err := eks.NewFromConfig(awsCfg).DescribeCluster(ctx, &eks.DescribeClusterInput{
+		Name: aws.String(c.Name),
+	})
+	if err != nil || out.Cluster == nil || out.Cluster.Arn == nil {
 		return ""
 	}
-	return strings.TrimSpace(*out.Account)
+	return accountIDFromARN(aws.ToString(out.Cluster.Arn))
+}
+
+var (
+	portalAWSAccountOnce sync.Once
+	portalAWSAccountID   string
+)
+
+func (s *Server) portalAWSAccountID(ctx context.Context) string {
+	portalAWSAccountOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		cfg, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return
+		}
+		out, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+		if err != nil {
+			return
+		}
+		portalAWSAccountID = strings.TrimSpace(aws.ToString(out.Account))
+	})
+	return portalAWSAccountID
+}
+
+func (s *Server) awsAccountIDFromDiscoveryConfig(ctx context.Context, c *ClusterConfig) string {
+	if c == nil {
+		return ""
+	}
+	envVal := os.Getenv("AWS_ACCOUNTS_DISCOVERY")
+	if envVal == "" {
+		return ""
+	}
+	externalID := os.Getenv("AWS_ACCOUNTS_DISCOVERY_EXTERNAL_ID")
+	if externalID == "" {
+		externalID = "StratosEKSDiscoveryExternalID"
+	}
+	configs, err := discovery.ParseAWSAccountsEnv(envVal)
+	if err != nil || len(configs) == 0 {
+		return ""
+	}
+	return discovery.LookupClusterAWSAccount(ctx, c.Name, c.APIServerURL, externalID, configs)
 }
 
 func (s *Server) enrichClusterMetadata(ctx context.Context, c *ClusterConfig, persist bool) {
@@ -125,12 +263,34 @@ func (s *Server) enrichClusterMetadata(ctx context.Context, c *ClusterConfig, pe
 	if c.Region == "" {
 		c.Region = parseRegion(c.APIServerURL)
 	}
-	if c.AWSAccountID == "" && c.Region != "" {
-		if accountID := detectAWSAccountID(ctx, c.Region); accountID != "" {
-			c.AWSAccountID = accountID
-			if persist && s.db != nil {
-				_ = s.db.SaveCluster(c)
+
+	portalAccount := s.portalAWSAccountID(ctx)
+	isEKSEndpoint := strings.Contains(c.APIServerURL, ".eks.amazonaws.com")
+
+	var inferredAccount string
+	if c.AuthType == "eks-assume-role" || c.AuthType == "in-cluster" {
+		inferredAccount = s.awsAccountIDFromEKSCluster(ctx, c)
+	}
+
+	if inferredAccount == "" && isEKSEndpoint {
+		inferredAccount = s.awsAccountIDFromDiscoveryConfig(ctx, c)
+	}
+
+	if inferredAccount == "" && c.AuthType == "eks-assume-role" && c.EncryptedData != "" {
+		if decrypted, err := s.config.Decrypt(c.EncryptedData); err == nil {
+			roleAccount := accountIDFromARN(string(decrypted))
+			if roleAccount != "" && roleAccount != portalAccount {
+				inferredAccount = roleAccount
 			}
 		}
+	}
+
+	if inferredAccount == "" || inferredAccount == c.AWSAccountID {
+		return
+	}
+
+	c.AWSAccountID = inferredAccount
+	if persist && s.db != nil {
+		_ = s.db.SaveCluster(c)
 	}
 }

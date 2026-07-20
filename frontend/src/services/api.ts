@@ -361,6 +361,12 @@ export const api = {
     return res.json();
   },
 
+  async getClusterAddons(clusterId: string): Promise<{ name: string; current: string; recommended: string }[]> {
+    const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/addons`, { headers: getHeaders() });
+    if (!res.ok) return [];
+    return res.json();
+  },
+
   async checkEcrRepo(clusterId: string, image: string): Promise<EcrCheck> {
     const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/ecr/check?image=${encodeURIComponent(image)}`, { headers: getHeaders() });
     if (!res.ok) {
@@ -368,6 +374,16 @@ export const api = {
       throw new Error(err.error || 'Failed to check ECR repository');
     }
     return res.json();
+  },
+
+  async resolveClusterImage(clusterId: string, image: string): Promise<string> {
+    const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/resolve-image?image=${encodeURIComponent(image)}`, { headers: getHeaders() });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to resolve cluster image' }));
+      throw new Error(err.error || 'Failed to resolve cluster image');
+    }
+    const data = await res.json();
+    return data.image || image;
   },
 
   async getConfigMap(clusterId: string, name: string, namespace = 'default'): Promise<{ name: string; namespace?: string; data: Record<string, string> }> {

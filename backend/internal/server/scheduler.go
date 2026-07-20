@@ -471,6 +471,12 @@ func resolveClusterImage(image string, clusterConfig *database.ClusterConfig) st
 		return trimmed
 	}
 
+	if idx := strings.Index(trimmed, ".dkr.ecr."); idx > 0 {
+		if slash := strings.Index(trimmed, "/"); slash > idx {
+			trimmed = trimmed[slash+1:]
+		}
+	}
+
 	parts := strings.Split(trimmed, "/")
 	if len(parts) > 1 && (strings.Contains(parts[0], ".") || strings.Contains(parts[0], ":") || parts[0] == "localhost") {
 		trimmed = strings.Join(parts[1:], "/")

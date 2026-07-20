@@ -75,7 +75,7 @@ export default function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title || "Dialog"}
-        className={`bg-slate-900 border border-slate-800 rounded-3xl w-full ${maxWidthClassName} p-6 shadow-2xl relative ${contained ? "h-[min(90vh,850px)] overflow-hidden flex flex-col" : "max-h-[85vh] overflow-y-auto"}`}
+        className={`bg-slate-900 border border-slate-800 rounded-3xl w-full ${maxWidthClassName} p-6 shadow-2xl relative ${contained ? "h-[min(90vh,850px)] flex flex-col" : "max-h-[85vh] overflow-y-auto"}`}
       >
         <button
           type="button"
@@ -99,7 +99,7 @@ export default function Modal({
             )}
           </div>
         )}
-        <div className={contained ? "min-h-0 flex-1 overflow-hidden" : ""}>
+        <div className={contained ? "min-h-0 flex-1" : ""}>
           {children}
         </div>
       </div>

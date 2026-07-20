@@ -7,13 +7,14 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import K6TestWizard from "./K6TestWizard";
+import K6TestWizard, { extractEnvVarsFromScript } from "./K6TestWizard";
 
 const apiMock = vi.hoisted(() => ({
   getClusters: vi.fn(),
   getTemplates: vi.fn(),
   getRunDefaults: vi.fn(),
   getNamespaces: vi.fn(),
+  resolveClusterImage: vi.fn(),
   createCRD: vi.fn(),
 }));
 
@@ -65,6 +66,9 @@ describe("K6TestWizard steps", () => {
       env_vars: [],
     });
     apiMock.getNamespaces.mockResolvedValue(["qa"]);
+    apiMock.resolveClusterImage.mockImplementation(
+      async (_clusterId: string, image: string) => image,
+    );
   });
 
   it("walks through template, target, load, resources, launch and review", async () => {
@@ -141,4 +145,78 @@ describe("K6TestWizard steps", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it("allows clicking stepper buttons to navigate steps", async () => {
+    render(
+      <K6TestWizard
+        open
+        advancedMode
+        onClose={() => undefined}
+        onCreated={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /Smoke test/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Continuer" })); // Target
+
+    // Navigate back to Template by clicking the Template stepper button
+    fireEvent.click(screen.getByRole("button", { name: "Template" }));
+    expect(screen.queryByLabelText("Cluster")).toBeNull();
+  });
+
+  it("dynamically sets testrun or job based on parallelism", async () => {
+    render(
+      <K6TestWizard
+        open
+        advancedMode
+        onClose={() => undefined}
+        onCreated={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /Smoke test/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Continuer" })); // to Target
+    fireEvent.click(screen.getByRole("button", { name: "Continuer" })); // to Load
+    fireEvent.click(screen.getByRole("button", { name: "Continuer" })); // to Resources
+    
+    const parallelismInput = await screen.findByLabelText("Parallélisme") as HTMLInputElement;
+    expect(parallelismInput.value).toBe("2"); // default parallelism from template-a is 2
+    
+    // Change parallelism to 1
+    fireEvent.change(parallelismInput, { target: { value: "1" } });
+    expect(parallelismInput.value).toBe("1");
+    
+    // Proceed to Launch and then Review step
+    fireEvent.click(screen.getByRole("button", { name: "Continuer" })); // to Launch
+    fireEvent.click(screen.getByRole("button", { name: "Continuer" })); // to Review
+    
+    // Confirm it shows Job in review step
+    expect((await screen.findAllByText("Job")).length).toBeGreaterThan(0);
+    
+    // Click stepper to go back and verify it switches to TestRun if parallelism is changed to > 1
+    fireEvent.click(screen.getByRole("button", { name: "Ressources" }));
+    const pInput = await screen.findByLabelText("Parallélisme") as HTMLInputElement;
+    fireEvent.change(pInput, { target: { value: "3" } });
+    
+    fireEvent.click(screen.getByRole("button", { name: "Vérification" }));
+    expect((await screen.findAllByText("TestRun")).length).toBeGreaterThan(0);
+  });
 });
+
+describe("extractEnvVarsFromScript helper", () => {
+  it("extracts env variables with dot and bracket notations", () => {
+    const script = `
+      export default function() {
+        http.get("https://" + __ENV.TARGET_HOST + "/api");
+        const tok = __ENV["API_TOKEN"];
+        const another = __ENV['OTHER_VAR'];
+        console.log(__ENV.USER_ID);
+      }
+    `;
+    const vars = extractEnvVarsFromScript(script);
+    expect(vars).toContain("TARGET_HOST");
+    expect(vars).toContain("API_TOKEN");
+    expect(vars).toContain("OTHER_VAR");
+    expect(vars).toContain("USER_ID");
+    expect(vars.length).toBe(4);
+  });
+});
+
