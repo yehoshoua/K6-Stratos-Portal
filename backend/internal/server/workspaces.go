@@ -122,19 +122,14 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateWorkspaceMember(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("id")
 	if workspaceID == "" {
-		http.Error(w, `{"error":"workspace id is required"}`, http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "workspace id is required")
 		return
 	}
 
-	username := r.Header.Get("X-User-Name")
-	globalRole := r.Header.Get("X-User-Role")
-
-	if globalRole != "administrator" && globalRole != "admin" {
-		role, err := s.db.GetWorkspaceUserRole(workspaceID, username)
-		if err != nil || role != "administrator" {
-			http.Error(w, `{"error":"only workspace administrators can add members"}`, http.StatusForbidden)
-			return
-		}
+	requester := getUserInfo(r)
+	if err := s.requireWorkspaceAdmin(workspaceID, requester.Username, requester.GlobalRole); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
 	}
 
 	var input struct {
@@ -142,17 +137,17 @@ func (s *Server) handleCreateWorkspaceMember(w http.ResponseWriter, r *http.Requ
 		Role     string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if input.Username == "" || input.Role == "" {
-		http.Error(w, `{"error":"username and role are required"}`, http.StatusBadRequest)
+	if input.Username == "" {
+		s.writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
 
-	if input.Role != "viewer" && input.Role != "editor" && input.Role != "administrator" {
-		http.Error(w, `{"error":"invalid role, must be viewer, editor, or administrator"}`, http.StatusBadRequest)
+	if !isValidRole(input.Role) {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid role, must be %s, %s, or %s", RoleViewer, RoleEditor, RoleAdministrator))
 		return
 	}
 
@@ -163,93 +158,86 @@ func (s *Server) handleCreateWorkspaceMember(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err := s.db.SaveWorkspaceUser(wu); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to add workspace member: %v", err))
 		return
 	}
 
-	w.Write([]byte(`{"status":"added"}`))
+	s.writeJSON(w, http.StatusCreated, map[string]string{"status": "added"})
 }
 
 func (s *Server) handleUpdateWorkspaceMember(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("id")
 	username := r.PathValue("username")
 	if workspaceID == "" || username == "" {
-		http.Error(w, `{"error":"workspace id and username are required"}`, http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "workspace id and username are required")
 		return
 	}
 
-	requester := r.Header.Get("X-User-Name")
-	globalRole := r.Header.Get("X-User-Role")
-	if globalRole != "administrator" && globalRole != "admin" {
-		role, err := s.db.GetWorkspaceUserRole(workspaceID, requester)
-		if err != nil || role != "administrator" {
-			http.Error(w, `{"error":"only workspace administrators can update members"}`, http.StatusForbidden)
-			return
-		}
+	requester := getUserInfo(r)
+	if err := s.requireWorkspaceAdmin(workspaceID, requester.Username, requester.GlobalRole); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
 	}
 
 	var input struct {
 		Role string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if input.Role != "viewer" && input.Role != "editor" && input.Role != "administrator" {
-		http.Error(w, `{"error":"invalid role, must be viewer, editor, or administrator"}`, http.StatusBadRequest)
+
+	if !isValidRole(input.Role) {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid role, must be %s, %s, or %s", RoleViewer, RoleEditor, RoleAdministrator))
 		return
 	}
 
 	existing, err := s.db.GetWorkspaceUserMembership(workspaceID, username)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to fetch member: %v", err))
 		return
 	}
 	if existing == nil {
-		http.Error(w, `{"error":"workspace member not found"}`, http.StatusNotFound)
+		s.writeError(w, http.StatusNotFound, "workspace member not found")
 		return
 	}
 
 	source := existing.Source
 	if source == "" {
-		source = "manual"
+		source = database.MembershipSourceManual
 	}
 	if err := s.db.SaveWorkspaceUserWithSource(&database.WorkspaceUser{
 		WorkspaceID: workspaceID,
 		Username:    username,
 		Role:        input.Role,
 	}, source); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update member: %v", err))
 		return
 	}
 
-	w.Write([]byte(`{"status":"updated"}`))
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
 func (s *Server) handleDeleteWorkspaceMember(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("id")
 	username := r.PathValue("username")
 	if workspaceID == "" || username == "" {
-		http.Error(w, `{"error":"workspace id and username are required"}`, http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "workspace id and username are required")
 		return
 	}
 
-	requester := r.Header.Get("X-User-Name")
-	globalRole := r.Header.Get("X-User-Role")
-	if globalRole != "administrator" && globalRole != "admin" {
-		role, err := s.db.GetWorkspaceUserRole(workspaceID, requester)
-		if err != nil || role != "administrator" {
-			http.Error(w, `{"error":"only workspace administrators can remove members"}`, http.StatusForbidden)
-			return
-		}
+	requester := getUserInfo(r)
+	if err := s.requireWorkspaceAdmin(workspaceID, requester.Username, requester.GlobalRole); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
 	}
 
 	if err := s.db.DeleteWorkspaceUser(workspaceID, username); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to remove member: %v", err))
 		return
 	}
 
-	w.Write([]byte(`{"status":"removed"}`))
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
 
 func (s *Server) handleListWorkspaceGroupMappings(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +260,7 @@ func (s *Server) handleListWorkspaceGroupMappings(w http.ResponseWriter, r *http
 func (s *Server) handleCreateWorkspaceGroupMapping(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("id")
 	if workspaceID == "" {
-		http.Error(w, `{"error":"workspace id is required"}`, http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "workspace id is required")
 		return
 	}
 
@@ -281,15 +269,17 @@ func (s *Server) handleCreateWorkspaceGroupMapping(w http.ResponseWriter, r *htt
 		Role     string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if input.IDPGroup == "" || input.Role == "" {
-		http.Error(w, `{"error":"idp_group and role are required"}`, http.StatusBadRequest)
+
+	if input.IDPGroup == "" {
+		s.writeError(w, http.StatusBadRequest, "idp_group is required")
 		return
 	}
-	if input.Role != "viewer" && input.Role != "editor" && input.Role != "administrator" {
-		http.Error(w, `{"error":"invalid role, must be viewer, editor, or administrator"}`, http.StatusBadRequest)
+
+	if !isValidRole(input.Role) {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid role, must be %s, %s, or %s", RoleViewer, RoleEditor, RoleAdministrator))
 		return
 	}
 
@@ -299,28 +289,27 @@ func (s *Server) handleCreateWorkspaceGroupMapping(w http.ResponseWriter, r *htt
 		Role:        input.Role,
 	}
 	if err := s.db.SaveWorkspaceGroupMapping(mapping); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create mapping: %v", err))
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
-	w.Write([]byte(`{"status":"created"}`))
+	s.writeJSON(w, http.StatusCreated, map[string]string{"status": "created"})
 }
 
 func (s *Server) handleDeleteWorkspaceGroupMapping(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("id")
 	idpGroup := r.PathValue("group")
 	if workspaceID == "" || idpGroup == "" {
-		http.Error(w, `{"error":"workspace id and group are required"}`, http.StatusBadRequest)
+		s.writeError(w, http.StatusBadRequest, "workspace id and group are required")
 		return
 	}
 
 	if err := s.db.DeleteWorkspaceGroupMapping(workspaceID, idpGroup); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete mapping: %v", err))
 		return
 	}
 
-	w.Write([]byte(`{"status":"deleted"}`))
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) handleGetUserWorkspaces(w http.ResponseWriter, r *http.Request) {

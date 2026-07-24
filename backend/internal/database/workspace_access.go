@@ -3,7 +3,21 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
+)
+
+// Workspace membership source constants
+const (
+	MembershipSourceManual = "manual"
+	MembershipSourceSSO    = "sso"
+)
+
+// Workspace role constants
+const (
+	WorkspaceRoleViewer       = "viewer"
+	WorkspaceRoleEditor       = "editor"
+	WorkspaceRoleAdministrator = "administrator"
 )
 
 type WorkspaceGroupMapping struct {
@@ -20,19 +34,25 @@ type UserWorkspaceMembership struct {
 	Source        string `json:"source"`
 }
 
+// workspaceRoleRank returns a numeric rank for a workspace role.
+// Higher rank = higher privilege. Used to resolve role conflicts when a user
+// belongs to multiple SSO groups with different roles.
 func workspaceRoleRank(role string) int {
 	switch strings.ToLower(strings.TrimSpace(role)) {
-	case "administrator", "admin":
+	case WorkspaceRoleAdministrator, "admin":
 		return 3
-	case "editor", "edit":
+	case WorkspaceRoleEditor, "edit":
 		return 2
-	case "viewer", "view":
+	case WorkspaceRoleViewer, "view":
 		return 1
 	default:
 		return 0
 	}
 }
 
+// higherWorkspaceRole returns the role with the highest privilege level.
+// Used during SSO sync to determine the effective role when a user matches
+// multiple group mappings with different roles.
 func higherWorkspaceRole(current, candidate string) string {
 	if workspaceRoleRank(candidate) > workspaceRoleRank(current) {
 		return candidate
@@ -40,8 +60,16 @@ func higherWorkspaceRole(current, candidate string) string {
 	return current
 }
 
+// normalizeIDPGroup normalizes an IDP group name to lowercase and trimmed.
+// Used consistently across all group comparisons to handle case-insensitive matching.
 func normalizeIDPGroup(group string) string {
 	return strings.ToLower(strings.TrimSpace(group))
+}
+
+// isValidWorkspaceRole validates that a role is one of the allowed workspace roles.
+func isValidWorkspaceRole(role string) bool {
+	role = strings.TrimSpace(role)
+	return role == WorkspaceRoleViewer || role == WorkspaceRoleEditor || role == WorkspaceRoleAdministrator
 }
 
 func (db *DB) ensureWorkspaceAccessTables() error {
@@ -61,28 +89,59 @@ func (db *DB) ensureWorkspaceAccessTables() error {
 		if _, err := db.conn.Exec(stmt); err != nil {
 			return fmt.Errorf("failed to migrate workspace_users.source column: %w", err)
 		}
-		return nil
-	}
-
-	var hasSource bool
-	rows, err := db.conn.Query("PRAGMA table_info(workspace_users);")
-	if err == nil {
-		for rows.Next() {
-			var cid int
-			var name, ctype string
-			var notnull, pk int
-			var dfltVal sql.NullString
-			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltVal, &pk); err == nil && name == "source" {
-				hasSource = true
+	} else {
+		// SQLite: check if source column exists
+		var hasSource bool
+		rows, err := db.conn.Query("PRAGMA table_info(workspace_users);")
+		if err == nil {
+			for rows.Next() {
+				var cid, notnull, pk int
+				var name, ctype string
+				var dfltVal sql.NullString
+				if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltVal, &pk); err == nil && name == "source" {
+					hasSource = true
+					break
+				}
+			}
+			rows.Close()
+		}
+		if !hasSource {
+			if _, err := db.conn.Exec("ALTER TABLE workspace_users ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';"); err != nil {
+				return fmt.Errorf("failed to migrate workspace_users.source column: %w", err)
 			}
 		}
-		rows.Close()
 	}
-	if !hasSource {
-		if _, err := db.conn.Exec("ALTER TABLE workspace_users ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';"); err != nil {
-			return fmt.Errorf("failed to migrate workspace_users.source column: %w", err)
-		}
+
+	// Create indexes for performance
+	if err := db.ensureWorkspaceAccessIndexes(); err != nil {
+		log.Printf("Warning: failed to create workspace access indexes: %v", err)
 	}
+
+	return nil
+}
+
+func (db *DB) ensureWorkspaceAccessIndexes() error {
+	// Index for workspace_group_mappings by workspace_id for faster lookups
+	if db.driver == "postgres" {
+		_, _ = db.conn.Exec("CREATE INDEX IF NOT EXISTS idx_workspace_group_mappings_workspace_id ON workspace_group_mappings(workspace_id)")
+	} else {
+		_, _ = db.conn.Exec("CREATE INDEX IF NOT EXISTS idx_workspace_group_mappings_workspace_id ON workspace_group_mappings(workspace_id)")
+	}
+
+	// Index for workspace_users by username for GetWorkspaceMembershipsForUser() queries
+	if db.driver == "postgres" {
+		_, _ = db.conn.Exec("CREATE INDEX IF NOT EXISTS idx_workspace_users_username ON workspace_users(username)")
+	} else {
+		_, _ = db.conn.Exec("CREATE INDEX IF NOT EXISTS idx_workspace_users_username ON workspace_users(username)")
+	}
+
+	// Index for workspace_users by workspace_id for GetWorkspaceUsers() queries
+	if db.driver == "postgres" {
+		_, _ = db.conn.Exec("CREATE INDEX IF NOT EXISTS idx_workspace_users_workspace_id ON workspace_users(workspace_id)")
+	} else {
+		_, _ = db.conn.Exec("CREATE INDEX IF NOT EXISTS idx_workspace_users_workspace_id ON workspace_users(workspace_id)")
+	}
+
 	return nil
 }
 
@@ -110,10 +169,19 @@ func (db *DB) GetWorkspaceGroupMappings(workspaceID string) ([]*WorkspaceGroupMa
 }
 
 func (db *DB) SaveWorkspaceGroupMapping(mapping *WorkspaceGroupMapping) error {
-	if mapping == nil || mapping.WorkspaceID == "" || mapping.IDPGroup == "" || mapping.Role == "" {
-		return fmt.Errorf("workspace_id, idp_group and role are required")
+	if mapping == nil || mapping.WorkspaceID == "" {
+		return fmt.Errorf("workspace_id is required")
 	}
-	mapping.IDPGroup = strings.TrimSpace(mapping.IDPGroup)
+	
+	idpGroup := normalizeIDPGroup(mapping.IDPGroup)
+	if idpGroup == "" {
+		return fmt.Errorf("idp_group cannot be empty or whitespace only")
+	}
+	
+	if !isValidWorkspaceRole(mapping.Role) {
+		return fmt.Errorf("invalid role: must be %s, %s, or %s", WorkspaceRoleViewer, WorkspaceRoleEditor, WorkspaceRoleAdministrator)
+	}
+	
 	query := db.rebind(`
 		INSERT INTO workspace_group_mappings (workspace_id, idp_group, role)
 		VALUES (?, ?, ?)
@@ -123,7 +191,7 @@ func (db *DB) SaveWorkspaceGroupMapping(mapping *WorkspaceGroupMapping) error {
 			INSERT OR REPLACE INTO workspace_group_mappings (workspace_id, idp_group, role)
 			VALUES (?, ?, ?);`
 	}
-	_, err := db.conn.Exec(query, mapping.WorkspaceID, mapping.IDPGroup, mapping.Role)
+	_, err := db.conn.Exec(query, mapping.WorkspaceID, idpGroup, mapping.Role)
 	return err
 }
 
@@ -202,9 +270,18 @@ func (db *DB) SaveWorkspaceUserWithSource(wu *WorkspaceUser, source string) erro
 	if wu == nil {
 		return fmt.Errorf("workspace user is required")
 	}
-	if source == "" {
-		source = "manual"
+	if wu.WorkspaceID == "" || wu.Username == "" {
+		return fmt.Errorf("workspace_id and username are required")
 	}
+	if !isValidWorkspaceRole(wu.Role) {
+		return fmt.Errorf("invalid role: must be %s, %s, or %s", WorkspaceRoleViewer, WorkspaceRoleEditor, WorkspaceRoleAdministrator)
+	}
+	
+	source = strings.TrimSpace(source)
+	if source != MembershipSourceManual && source != MembershipSourceSSO {
+		source = MembershipSourceManual
+	}
+	
 	var query string
 	if db.driver == "postgres" {
 		query = `
@@ -284,30 +361,50 @@ func (db *DB) SyncUserWorkspaceMembershipsFromGroups(username string, groups []s
 		existingByWorkspace[membership.WorkspaceID] = membership
 	}
 
+	// Track changes for logging
+	added := 0
+	updated := 0
+	removed := 0
+
+	// Add or update SSO-provisioned workspace memberships
 	for workspaceID, role := range desiredRoles {
 		current := existingByWorkspace[workspaceID]
-		if current != nil && current.Source == "manual" {
+		if current != nil && current.Source == MembershipSourceManual {
+			// Don't override manual memberships with SSO
 			continue
 		}
+		
+		if current == nil {
+			added++
+		} else if current.Role != role {
+			updated++
+		}
+		
 		if err := db.SaveWorkspaceUserWithSource(&WorkspaceUser{
 			WorkspaceID: workspaceID,
 			Username:    username,
 			Role:        role,
-		}, "sso"); err != nil {
+		}, MembershipSourceSSO); err != nil {
 			return err
 		}
 	}
 
+	// Remove SSO-provisioned memberships that are no longer valid
 	for _, membership := range existing {
-		if membership.Source != "sso" {
+		if membership.Source != MembershipSourceSSO {
 			continue
 		}
 		if _, ok := desiredRoles[membership.WorkspaceID]; ok {
 			continue
 		}
+		removed++
 		if err := db.DeleteWorkspaceUser(membership.WorkspaceID, username); err != nil {
 			return err
 		}
+	}
+
+	if added > 0 || updated > 0 || removed > 0 {
+		log.Printf("Synced user %s: added %d workspace(s), updated %d, removed %d", username, added, updated, removed)
 	}
 
 	return nil
