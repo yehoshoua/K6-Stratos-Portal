@@ -159,6 +159,62 @@ html[data-palette="golden-harvest"] {
   --accent-lightest: #fffae0 !important;
 }
 
+/* Neon Emerald */
+html[data-palette="neon-emerald"] {
+  --primary-dark: #064e3b !important;
+  --primary-hover: #059669 !important;
+  --primary: #10b981 !important;
+  --primary-light: #34d399 !important;
+  --primary-lightest: #d1fae5 !important;
+  --accent-dark: #047857 !important;
+  --accent-hover: #10b981 !important;
+  --accent: #6ee7b7 !important;
+  --accent-light: #a7f3d0 !important;
+  --accent-lightest: #ecfdf5 !important;
+}
+
+/* Sunset Glow */
+html[data-palette="sunset-glow"] {
+  --primary-dark: #78350f !important;
+  --primary-hover: #d97706 !important;
+  --primary: #f59e0b !important;
+  --primary-light: #fbbf24 !important;
+  --primary-lightest: #fef3c7 !important;
+  --accent-dark: #9a3412 !important;
+  --accent-hover: #ea580c !important;
+  --accent: #f97316 !important;
+  --accent-light: #fb923c !important;
+  --accent-lightest: #ffedd5 !important;
+}
+
+/* Cyber Neon */
+html[data-palette="cyber-neon"] {
+  --primary-dark: #6b21a8 !important;
+  --primary-hover: #a855f7 !important;
+  --primary: #c084fc !important;
+  --primary-light: #e9d5ff !important;
+  --primary-lightest: #f3e8ff !important;
+  --accent-dark: #9d174d !important;
+  --accent-hover: #ec4899 !important;
+  --accent: #f472b6 !important;
+  --accent-light: #fbcfe8 !important;
+  --accent-lightest: #fdf2f8 !important;
+}
+
+/* Royal Vibrant */
+html[data-palette="royal-vibrant"] {
+  --primary-dark: #1e3a8a !important;
+  --primary-hover: #2563eb !important;
+  --primary: #3b82f6 !important;
+  --primary-light: #60a5fa !important;
+  --primary-lightest: #dbeafe !important;
+  --accent-dark: #0e7490 !important;
+  --accent-hover: #0891b2 !important;
+  --accent: #06b6d4 !important;
+  --accent-light: #22d3ee !important;
+  --accent-lightest: #cffafe !important;
+}
+
 /* System-based styling selectors */
 @media (prefers-color-scheme: light) {
   html[data-theme="system"] {

@@ -227,6 +227,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/k8s/clusters/{id}", s.authMiddleware(s.adminOnly(s.handleDeleteCluster)))
 	mux.HandleFunc("GET /api/k8s/clusters/{id}/namespaces", s.authMiddleware(s.handleListNamespaces))
 	mux.HandleFunc("GET /api/k8s/clusters/{id}/addons", s.authMiddleware(s.handleGetClusterAddons))
+	mux.HandleFunc("POST /api/k8s/clusters/{id}/addons/{addon_name}/upgrade", s.authMiddleware(s.adminOnly(s.handleUpgradeClusterAddon)))
 
 	// AWS EKS Discovery endpoints
 	mux.HandleFunc("GET /api/settings/eks-discovery", s.authMiddleware(s.adminOnly(s.handleGetEKSDiscoveryConfig)))
@@ -251,7 +252,26 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Settings User Management routes (admin only)
 	mux.HandleFunc("GET /api/settings/users", s.authMiddleware(s.adminOnly(s.handleListUsers)))
 	mux.HandleFunc("POST /api/settings/users", s.authMiddleware(s.adminOnly(s.handleCreateUser)))
+	mux.HandleFunc("PUT /api/settings/users/{username}", s.authMiddleware(s.adminOnly(s.handleUpdateUser)))
 	mux.HandleFunc("DELETE /api/settings/users/{username}", s.authMiddleware(s.adminOnly(s.handleDeleteUser)))
+
+	// Workspace routes
+	mux.HandleFunc("GET /api/workspaces", s.authMiddleware(s.handleListWorkspaces))
+	mux.HandleFunc("POST /api/workspaces", s.authMiddleware(s.adminOnly(s.handleCreateWorkspace)))
+	mux.HandleFunc("POST /api/workspaces/{id}/members", s.authMiddleware(s.handleCreateWorkspaceMember))
+	mux.HandleFunc("PUT /api/workspaces/{id}/members/{username}", s.authMiddleware(s.handleUpdateWorkspaceMember))
+	mux.HandleFunc("DELETE /api/workspaces/{id}/members/{username}", s.authMiddleware(s.handleDeleteWorkspaceMember))
+	mux.HandleFunc("GET /api/workspaces/{id}/members", s.authMiddleware(s.handleListWorkspaceMembers))
+	mux.HandleFunc("GET /api/workspaces/{id}/group-mappings", s.authMiddleware(s.adminOnly(s.handleListWorkspaceGroupMappings)))
+	mux.HandleFunc("POST /api/workspaces/{id}/group-mappings", s.authMiddleware(s.adminOnly(s.handleCreateWorkspaceGroupMapping)))
+	mux.HandleFunc("DELETE /api/workspaces/{id}/group-mappings/{group}", s.authMiddleware(s.adminOnly(s.handleDeleteWorkspaceGroupMapping)))
+	mux.HandleFunc("DELETE /api/workspaces/{id}", s.authMiddleware(s.adminOnly(s.handleDeleteWorkspace)))
+	mux.HandleFunc("GET /api/settings/users/{username}/workspaces", s.authMiddleware(s.handleGetUserWorkspaces))
+
+	// Dataset File Management routes
+	mux.HandleFunc("POST /api/files/upload", s.authMiddleware(s.workspaceAuth("editor", s.handleUploadFile)))
+	mux.HandleFunc("GET /api/files", s.authMiddleware(s.workspaceAuth("viewer", s.handleListFiles)))
+	mux.HandleFunc("DELETE /api/files/{filename}", s.authMiddleware(s.workspaceAuth("editor", s.handleDeleteFile)))
 
 	// Settings SSO/OIDC routes
 	mux.HandleFunc("GET /api/settings/sso", s.authMiddleware(s.adminOnly(s.handleGetSSOConfig)))
@@ -269,6 +289,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Run defaults routes (editor+)
 	mux.HandleFunc("GET /api/settings/defaults", s.authMiddleware(s.handleGetRunDefaults))
 	mux.HandleFunc("POST /api/settings/defaults", s.authMiddleware(s.editorOrAdmin(s.handleSaveRunDefaults)))
+
+	// Appearance settings (default palette for new users)
+	mux.HandleFunc("GET /api/settings/appearance", s.handleGetAppearanceSettings)
+	mux.HandleFunc("POST /api/settings/appearance", s.authMiddleware(s.adminOnly(s.handleSaveAppearanceSettings)))
 
 	// API Tokens management routes (admin only)
 	mux.HandleFunc("GET /api/settings/tokens", s.authMiddleware(s.adminOnly(s.handleListAPITokens)))
@@ -303,6 +327,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Pod log streaming route
 	mux.HandleFunc("GET /api/k8s/clusters/{id}/pods", s.authMiddleware(s.handleListPods))
 	mux.HandleFunc("GET /api/k8s/clusters/{id}/pods/{pod_name}/logs", s.authMiddleware(s.handleGetPodLogs))
+	mux.HandleFunc("GET /api/k8s/clusters/{id}/pods/{pod_name}/metrics", s.authMiddleware(s.handleGetPodMetrics))
 
 	// Schedules routes
 	mux.HandleFunc("GET /api/settings/schedules", s.authMiddleware(s.handleListSchedules))

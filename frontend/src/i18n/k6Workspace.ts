@@ -96,6 +96,8 @@ const en = {
   type: "Type",
   refresh: "Refresh",
   editInSettings: "Manage templates",
+  runDefaultsEnv: "Environment variables",
+  runDefaultsEnvAdd: "Add variable",
 } as const;
 
 type Copy = { [K in keyof typeof en]: string };
@@ -198,6 +200,8 @@ const fr: Copy = {
   type: "Type",
   refresh: "Actualiser",
   editInSettings: "Gérer les templates",
+  runDefaultsEnv: "Variables d'environnement",
+  runDefaultsEnvAdd: "Ajouter une variable",
 };
 
 const es: Copy = {

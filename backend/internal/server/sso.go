@@ -326,6 +326,7 @@ func (s *Server) handleSSOCallbackExchange(w http.ResponseWriter, r *http.Reques
 				_ = s.db.SaveUser(existingUser)
 			}
 		}
+		_ = s.db.SyncUserWorkspaceMembershipsFromGroups(username, userProfile.Groups)
 	}
 
 	sessionToken, err := s.authSvc.GenerateToken(username, role)

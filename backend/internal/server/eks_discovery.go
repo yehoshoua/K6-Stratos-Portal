@@ -12,11 +12,8 @@ import (
 
 // handleGetEKSDiscoveryConfig returns whether discovery is configured and what accounts/regions are defined
 func (s *Server) handleGetEKSDiscoveryConfig(w http.ResponseWriter, r *http.Request) {
-	envVal := os.Getenv("AWS_ACCOUNTS_DISCOVERY")
-	externalID := os.Getenv("AWS_ACCOUNTS_DISCOVERY_EXTERNAL_ID")
-	if externalID == "" {
-		externalID = "StratosEKSDiscoveryExternalID" // Default
-	}
+	envVal := os.Getenv(discovery.EnvAccountsDiscovery)
+	externalID := discovery.DiscoveryExternalID()
 
 	configs, err := discovery.ParseAWSAccountsEnv(envVal)
 	if err != nil {
@@ -29,17 +26,15 @@ func (s *Server) handleGetEKSDiscoveryConfig(w http.ResponseWriter, r *http.Requ
 		"enabled":     envVal != "",
 		"raw_env":     envVal,
 		"external_id": externalID,
+		"role_name":   discovery.DiscoveryRoleName(),
 		"accounts":    configs,
 	})
 }
 
 // handleDiscoverEKSClusters triggers the EKS auto-discovery process
 func (s *Server) handleDiscoverEKSClusters(w http.ResponseWriter, r *http.Request) {
-	envVal := os.Getenv("AWS_ACCOUNTS_DISCOVERY")
-	externalID := os.Getenv("AWS_ACCOUNTS_DISCOVERY_EXTERNAL_ID")
-	if externalID == "" {
-		externalID = "StratosEKSDiscoveryExternalID" // Default
-	}
+	envVal := os.Getenv(discovery.EnvAccountsDiscovery)
+	externalID := discovery.DiscoveryExternalID()
 
 	configs, err := discovery.ParseAWSAccountsEnv(envVal)
 	if err != nil {

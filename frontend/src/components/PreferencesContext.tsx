@@ -2,10 +2,25 @@
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { supplementalStrings } from '@/i18n/strings';
+import { api } from '@/services/api';
 
 export type Language = 'en' | 'fr' | 'he' | 'zh' | 'es' | 'de';
 export type Theme = 'light' | 'dark' | 'system';
-export type ColorPalette = 'default' | 'ocean-blue' | 'gradient-blues' | 'blue-serenity' | 'golden-harvest' | string;
+export type ColorPalette = 'royal-vibrant' | 'golden-harvest' | 'cyber-neon' | 'gradient-blues' | string;
+
+export const ALLOWED_PALETTE_IDS: ColorPalette[] = [
+  'royal-vibrant',
+  'golden-harvest',
+  'cyber-neon',
+  'gradient-blues',
+];
+
+export const FALLBACK_PALETTE_ID: ColorPalette = 'royal-vibrant';
+export const FALLBACK_LANGUAGE: Language = 'en';
+export const FALLBACK_THEME: Theme = 'light';
+
+const allowedLanguageSet = new Set<string>(['en', 'fr', 'he', 'zh', 'es', 'de']);
+const allowedThemeSet = new Set<string>(['light', 'dark', 'system']);
 
 export interface CustomPalette {
   id: string;
@@ -33,9 +48,11 @@ interface PreferencesContextType {
   setLang: (lang: Language) => void;
   setTheme: (theme: Theme) => void;
   setColorPalette: (palette: ColorPalette) => void;
-  customPalettes: CustomPalette[];
+  palettes: CustomPalette[];
   addCustomPalette: (palette: CustomPalette) => void;
   deleteCustomPalette: (id: string) => void;
+  resetToDefaultPalettes: () => void;
+  isBuiltinPalette: (id: string) => boolean;
   t: (key: string, params?: Record<string, string | number>) => string;
 }
 
@@ -214,6 +231,11 @@ const translations = {
     paletteGradientBlues: "Gradient Blues",
     paletteBlueSerenity: "Blue Serenity",
     paletteGoldenHarvest: "Golden Harvest",
+    paletteNeonEmerald: "Neon Emerald & Mint",
+    paletteSunsetGlow: "Sunset Gold & Orange",
+    paletteCyberNeon: "Cyber Purple & Neon Pink",
+    paletteRoyalVibrant: "Royal Blue & Cyan",
+    resetColors: "Reset to Default Palettes",
     addCustomPalette: "+ Add Custom Palette",
     customPaletteTitle: "Add Custom Palette",
     editCustomPalette: "Edit Custom Palette",
@@ -409,6 +431,11 @@ const translations = {
     paletteGradientBlues: "Dégradés de Bleu",
     paletteBlueSerenity: "Bleu Sérénité",
     paletteGoldenHarvest: "Moisson Dorée",
+    paletteNeonEmerald: "Émeraude Néon & Menthe",
+    paletteSunsetGlow: "Coucher de Soleil & Orange",
+    paletteCyberNeon: "Violet Cyber & Rose Néon",
+    paletteRoyalVibrant: "Bleu Royal & Cyan",
+    resetColors: "Réinitialiser les Palettes",
     addCustomPalette: "+ Palette personnalisée",
     customPaletteTitle: "Ajouter une palette personnalisée",
     editCustomPalette: "Modifier la palette personnalisée",
@@ -604,6 +631,11 @@ const translations = {
     paletteGradientBlues: "כחולים מדורגים",
     paletteBlueSerenity: "שלווה כחולה",
     paletteGoldenHarvest: "קציר הזהב",
+    paletteNeonEmerald: "ברקת ניאון ומנטה",
+    paletteSunsetGlow: "זהב שקיעה וכתום",
+    paletteCyberNeon: "סגול סייבר וורוד ניאון",
+    paletteRoyalVibrant: "כחול מלכותי וציאן",
+    resetColors: "אפס לפלטות ברירת מחדל",
     addCustomPalette: "+ הוסף פלטה מותאמת אישית",
     customPaletteTitle: "הוסף פלטה מותאמת אישית",
     editCustomPalette: "ערוך פלטה מותאמת אישית",
@@ -799,6 +831,11 @@ const translations = {
     paletteGradientBlues: "渐变之蓝 (Gradient Blues)",
     paletteBlueSerenity: "宁静之蓝 (Blue Serenity)",
     paletteGoldenHarvest: "金色麦浪 (Golden Harvest)",
+    paletteNeonEmerald: "霓虹祖母绿与薄荷 (Neon Emerald & Mint)",
+    paletteSunsetGlow: "落日余晖金与橙 (Sunset Gold & Orange)",
+    paletteCyberNeon: "赛博紫与霓虹粉 (Cyber Purple & Neon Pink)",
+    paletteRoyalVibrant: "皇家蓝与青色 (Royal Blue & Cyan)",
+    resetColors: "重置为默认调色板",
     addCustomPalette: "+ 添加自定义调色板",
     customPaletteTitle: "添加自定义调色板",
     editCustomPalette: "编辑自定义调色板",
@@ -994,6 +1031,11 @@ const translations = {
     paletteGradientBlues: "Azules degradados (Gradient Blues)",
     paletteBlueSerenity: "Serenidad azul (Blue Serenity)",
     paletteGoldenHarvest: "Cosecha dorada (Golden Harvest)",
+    paletteNeonEmerald: "Esmeralda neón y menta",
+    paletteSunsetGlow: "Oro atardecer y naranja",
+    paletteCyberNeon: "Púrpura cyber y rosa neón",
+    paletteRoyalVibrant: "Azul real y cian",
+    resetColors: "Restablecer paletas por defecto",
     addCustomPalette: "+ Añadir paleta personalizada",
     customPaletteTitle: "Añadir paleta personalizada",
     editCustomPalette: "Editar paleta personalizada",
@@ -1189,6 +1231,11 @@ const translations = {
     paletteGradientBlues: "Farbverlauf Blautöne",
     paletteBlueSerenity: "Blaue Gelassenheit",
     paletteGoldenHarvest: "Goldene Ernte",
+    paletteNeonEmerald: "Neon-Smaragd & Minze",
+    paletteSunsetGlow: "Sonnenuntergangsgold & Orange",
+    paletteCyberNeon: "Cyber-Violett & Neon-Pink",
+    paletteRoyalVibrant: "Königsblau & Cyan",
+    resetColors: "Auf Standardpaletten zurücksetzen",
     addCustomPalette: "+ Benutzerdefinierte Palette hinzufügen",
     customPaletteTitle: "Benutzerdefinierte Palette hinzufügen",
     editCustomPalette: "Benutzerdefinierte Palette bearbeiten",
@@ -1213,75 +1260,21 @@ const translations = {
 };
 export const defaultPalettes: CustomPalette[] = [
   {
-    id: 'default',
-    name: 'paletteDefault',
+    id: 'royal-vibrant',
+    name: 'paletteRoyalVibrant',
     colors: {
-      primary: '#a855f7',
-      primaryHover: '#9333ea',
-      primaryLight: '#c084fc',
-      primaryLightest: '#e9d5ff',
-      primaryDark: '#581c87',
-      accent: '#ec4899',
-      accentHover: '#db2777',
-      accentLight: '#f472b6',
-      accentLightest: '#fbcfe8',
-      accentDark: '#831843',
-      backgroundDark: '#090d16',
-      backgroundLight: '#f1f5f9'
-    }
-  },
-  {
-    id: 'ocean-blue',
-    name: 'paletteOceanBlue',
-    colors: {
-      primary: '#0077b6',
-      primaryHover: '#023e8a',
-      primaryLight: '#00b4d8',
-      primaryLightest: '#90e0ef',
-      primaryDark: '#03045e',
-      accent: '#00b4d8',
-      accentHover: '#0077b6',
-      accentLight: '#90e0ef',
-      accentLightest: '#caf0f8',
-      accentDark: '#023e8a',
-      backgroundDark: '#090d16',
-      backgroundLight: '#f1f5f9'
-    }
-  },
-  {
-    id: 'gradient-blues',
-    name: 'paletteGradientBlues',
-    colors: {
-      primary: '#0a9396',
-      primaryHover: '#005f73',
-      primaryLight: '#94d2bd',
-      primaryLightest: '#cae9e0',
-      primaryDark: '#003d4c',
-      accent: '#94d2bd',
-      accentHover: '#0a9396',
-      accentLight: '#cae9e0',
-      accentLightest: '#e9d8a6',
-      accentDark: '#005f73',
-      backgroundDark: '#090d16',
-      backgroundLight: '#f1f5f9'
-    }
-  },
-  {
-    id: 'blue-serenity',
-    name: 'paletteBlueSerenity',
-    colors: {
-      primary: '#3a76b0',
-      primaryHover: '#1e4f8c',
-      primaryLight: '#a7c6ed',
-      primaryLightest: '#d7e3fc',
-      primaryDark: '#112244',
-      accent: '#a7c6ed',
-      accentHover: '#3a76b0',
-      accentLight: '#d7e3fc',
-      accentLightest: '#edf2fb',
-      accentDark: '#1a365d',
-      backgroundDark: '#090d16',
-      backgroundLight: '#f1f5f9'
+      primary: '#3b82f6',
+      primaryHover: '#2563eb',
+      primaryLight: '#60a5fa',
+      primaryLightest: '#0c0d0d',
+      primaryDark: '#1e3a8a',
+      accent: '#06b6d4',
+      accentHover: '#0891b2',
+      accentLight: '#22d3ee',
+      accentLightest: '#cffafe',
+      accentDark: '#0e7490',
+      backgroundDark: '#0e1a3f',
+      backgroundLight: '#e5ecf5'
     }
   },
   {
@@ -1301,39 +1294,154 @@ export const defaultPalettes: CustomPalette[] = [
       backgroundDark: '#090d16',
       backgroundLight: '#f1f5f9'
     }
+  },
+  {
+    id: 'cyber-neon',
+    name: 'paletteCyberNeon',
+    colors: {
+      primary: '#c084fc',
+      primaryHover: '#a855f7',
+      primaryLight: '#e9d5ff',
+      primaryLightest: '#f3e8ff',
+      primaryDark: '#6b21a8',
+      accent: '#f472b6',
+      accentHover: '#ec4899',
+      accentLight: '#fbcfe8',
+      accentLightest: '#fdf2f8',
+      accentDark: '#9d174d',
+      backgroundDark: '#0a0515',
+      backgroundLight: '#faf5ff'
+    }
+  },
+  {
+    id: 'gradient-blues',
+    name: 'paletteGradientBlues',
+    colors: {
+      primary: '#0a9396',
+      primaryHover: '#005f73',
+      primaryLight: '#94d2bd',
+      primaryLightest: '#cae9e0',
+      primaryDark: '#003d4c',
+      accent: '#94d2bd',
+      accentHover: '#0a9396',
+      accentLight: '#cae9e0',
+      accentLightest: '#e9d8a6',
+      accentDark: '#005f73',
+      backgroundDark: '#090d16',
+      backgroundLight: '#f1f5f9'
+    }
   }
 ];
+
+const allowedPaletteSet = new Set<string>(ALLOWED_PALETTE_IDS);
+
+export function isBuiltinPaletteId(id: string): boolean {
+  return allowedPaletteSet.has(id);
+}
+
+function loadCustomPalettes(): CustomPalette[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const saved = localStorage.getItem('pref-custom-palettes');
+    if (!saved) return [];
+    const parsed = JSON.parse(saved) as CustomPalette[];
+    return parsed.filter((p) => p.id && !isBuiltinPaletteId(p.id));
+  } catch {
+    return [];
+  }
+}
+
+function mergePalettes(customPalettes: CustomPalette[]): CustomPalette[] {
+  return [...defaultPalettes, ...customPalettes.filter((p) => !isBuiltinPaletteId(p.id))];
+}
+
+function resolvePalette(saved: string | null, serverDefault: string, knownIds: Set<string>): ColorPalette {
+  if (saved && knownIds.has(saved)) {
+    return saved;
+  }
+  if (knownIds.has(serverDefault)) {
+    return serverDefault;
+  }
+  if (allowedPaletteSet.has(serverDefault)) {
+    return serverDefault;
+  }
+  return FALLBACK_PALETTE_ID;
+}
+
+function resolveLanguage(saved: string | null, serverDefault: string): Language {
+  if (saved && allowedLanguageSet.has(saved)) {
+    return saved as Language;
+  }
+  if (allowedLanguageSet.has(serverDefault)) {
+    return serverDefault as Language;
+  }
+  return FALLBACK_LANGUAGE;
+}
+
+function resolveTheme(saved: string | null, serverDefault: string): Theme {
+  if (saved && allowedThemeSet.has(saved)) {
+    return saved as Theme;
+  }
+  if (allowedThemeSet.has(serverDefault)) {
+    return serverDefault as Theme;
+  }
+  return FALLBACK_THEME;
+}
 
 const PreferencesContext = createContext<PreferencesContextType | undefined>(undefined);
 
 export function PreferencesProvider({ children }: { children: React.ReactNode }) {
-  const [lang, setLangState] = useState<Language>('en');
-  const [theme, setThemeState] = useState<Theme>('system');
-  const [colorPalette, setColorPaletteState] = useState<ColorPalette>('default');
-  const [customPalettes, setCustomPalettes] = useState<CustomPalette[]>([]);
+  const [lang, setLangState] = useState<Language>(FALLBACK_LANGUAGE);
+  const [theme, setThemeState] = useState<Theme>(FALLBACK_THEME);
+  const [colorPalette, setColorPaletteState] = useState<ColorPalette>(FALLBACK_PALETTE_ID);
+  const [palettes, setPalettes] = useState<CustomPalette[]>(defaultPalettes);
 
-  // Load from local storage
+  // Load from local storage and server default palette
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const savedLang = localStorage.getItem('pref-lang') as Language;
-      const savedTheme = localStorage.getItem('pref-theme') as Theme;
-      const savedPalette = localStorage.getItem('pref-palette') as ColorPalette;
-      const savedCustom = localStorage.getItem('pref-custom-palettes');
-      if (savedLang) setLangState(savedLang);
-      if (savedTheme) setThemeState(savedTheme);
-      if (savedPalette) setColorPaletteState(savedPalette);
-      if (savedCustom) {
-        try {
-          setCustomPalettes(JSON.parse(savedCustom));
-        } catch (e) {
-          console.error('Failed to parse custom palettes', e);
-          setCustomPalettes(defaultPalettes);
-        }
-      } else {
-        setCustomPalettes(defaultPalettes);
-        localStorage.setItem('pref-custom-palettes', JSON.stringify(defaultPalettes));
-      }
+    if (typeof window === 'undefined') return;
+
+    const savedLang = localStorage.getItem('pref-lang');
+    const savedTheme = localStorage.getItem('pref-theme');
+    const savedPalette = localStorage.getItem('pref-palette');
+    const customPalettes = loadCustomPalettes();
+    const mergedPalettes = mergePalettes(customPalettes);
+    const knownPaletteIds = new Set(mergedPalettes.map((p) => p.id));
+    setPalettes(mergedPalettes);
+    if (customPalettes.length > 0) {
+      localStorage.setItem('pref-custom-palettes', JSON.stringify(customPalettes));
     }
+
+    const applyAppearanceDefaults = (settings: {
+      default_color_palette: string;
+      default_language: string;
+      default_theme: string;
+    }) => {
+      const resolvedLang = resolveLanguage(savedLang, settings.default_language);
+      const resolvedTheme = resolveTheme(savedTheme, settings.default_theme);
+      const resolvedPalette = resolvePalette(savedPalette, settings.default_color_palette, knownPaletteIds);
+
+      setLangState(resolvedLang);
+      setThemeState(resolvedTheme);
+      setColorPaletteState(resolvedPalette);
+
+      if (!savedLang || !allowedLanguageSet.has(savedLang)) {
+        localStorage.setItem('pref-lang', resolvedLang);
+      }
+      if (!savedTheme || !allowedThemeSet.has(savedTheme)) {
+        localStorage.setItem('pref-theme', resolvedTheme);
+      }
+      if (!savedPalette || !knownPaletteIds.has(savedPalette)) {
+        localStorage.setItem('pref-palette', resolvedPalette);
+      }
+    };
+
+    api.getAppearanceSettings()
+      .then((settings) => applyAppearanceDefaults(settings))
+      .catch(() => applyAppearanceDefaults({
+        default_color_palette: FALLBACK_PALETTE_ID,
+        default_language: FALLBACK_LANGUAGE,
+        default_theme: FALLBACK_THEME,
+      }));
   }, []);
 
   const setLang = (newLang: Language) => {
@@ -1351,25 +1459,35 @@ export function PreferencesProvider({ children }: { children: React.ReactNode })
     localStorage.setItem('pref-palette', newPalette);
   };
 
+  const persistCustomPalettes = (customOnly: CustomPalette[]) => {
+    localStorage.setItem('pref-custom-palettes', JSON.stringify(customOnly));
+    setPalettes(mergePalettes(customOnly));
+  };
+
   const addCustomPalette = (palette: CustomPalette) => {
-    setCustomPalettes((prev) => {
-      const updated = [...prev.filter((p) => p.id !== palette.id), palette];
-      localStorage.setItem('pref-custom-palettes', JSON.stringify(updated));
-      return updated;
-    });
+    const customOnly = palettes
+      .filter((p) => !isBuiltinPaletteId(p.id))
+      .filter((p) => p.id !== palette.id);
+    customOnly.push(palette);
+    persistCustomPalettes(customOnly);
   };
 
   const deleteCustomPalette = (id: string) => {
-    setCustomPalettes((prev) => {
-      const updated = prev.filter((p) => p.id !== id);
-      localStorage.setItem('pref-custom-palettes', JSON.stringify(updated));
-      if (colorPalette === id) {
-        const nextPalette = updated.length > 0 ? updated[0].id : 'default';
-        setTimeout(() => setColorPalette(nextPalette), 0);
-      }
-      return updated;
-    });
+    if (isBuiltinPaletteId(id)) return;
+    const customOnly = palettes.filter((p) => !isBuiltinPaletteId(p.id) && p.id !== id);
+    persistCustomPalettes(customOnly);
+    if (colorPalette === id) {
+      const nextPalette = defaultPalettes[0]?.id || FALLBACK_PALETTE_ID;
+      setColorPalette(nextPalette);
+    }
   };
+
+  const resetToDefaultPalettes = () => {
+    persistCustomPalettes([]);
+    setColorPalette(FALLBACK_PALETTE_ID);
+  };
+
+  const isBuiltinPalette = (id: string) => isBuiltinPaletteId(id);
 
   // Sync theme with document element attribute
   useEffect(() => {
@@ -1392,7 +1510,7 @@ export function PreferencesProvider({ children }: { children: React.ReactNode })
         activeTheme = typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       }
 
-      const palette = customPalettes.find((p) => p.id === colorPalette);
+      const palette = palettes.find((p) => p.id === colorPalette);
       if (palette) {
         root.style.setProperty('--primary-dark', palette.colors.primaryDark, 'important');
         root.style.setProperty('--primary-hover', palette.colors.primaryHover, 'important');
@@ -1433,7 +1551,7 @@ export function PreferencesProvider({ children }: { children: React.ReactNode })
       mediaQuery.addEventListener('change', listener);
       return () => mediaQuery.removeEventListener('change', listener);
     }
-  }, [colorPalette, customPalettes, theme]);
+  }, [colorPalette, palettes, theme]);
 
   const t = (key: string, params?: Record<string, string | number>): string => {
     const dict = translations[lang] || translations['en'];
@@ -1455,9 +1573,11 @@ export function PreferencesProvider({ children }: { children: React.ReactNode })
         setLang,
         setTheme,
         setColorPalette,
-        customPalettes,
+        palettes,
         addCustomPalette,
         deleteCustomPalette,
+        resetToDefaultPalettes,
+        isBuiltinPalette,
         t,
       }}
     >

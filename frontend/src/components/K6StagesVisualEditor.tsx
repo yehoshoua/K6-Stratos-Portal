@@ -1,162 +1,276 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
-import { Activity } from 'lucide-react';
-import { usePreferences } from './PreferencesContext';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
+import { Activity, Plus, Trash2 } from 'lucide-react';
+import { usePreferences } from '@/components/PreferencesContext';
+import {
+  K6Stage,
+  parseStagesFromScript,
+  updateStagesInScript,
+} from '@/utils/k6ScriptStages';
 
-interface K6Stage {
-  duration: string;
-  target: number;
+interface K6StagesVisualEditorProps {
+  script: string;
+  onChange: (script: string) => void;
+  showStageList?: boolean;
 }
 
-interface ChartPoint {
-  x: number;
-  y: number;
-  time: number;
-  target: number;
+function formatSeconds(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (remainingSeconds === 0) return `${minutes}m`;
+  return `${minutes}m ${remainingSeconds}s`;
 }
 
-const parseDuration = (duration: string): number => {
-  const match = duration.trim().match(/^(\d+)([smh])$/);
-  if (!match) return 0;
-  const value = Number(match[1]);
-  return match[2] === 'h' ? value * 3600 : match[2] === 'm' ? value * 60 : value;
-};
+function parseDurationToSeconds(duration: string): number {
+  let seconds = 0;
+  const minutes = duration.match(/(\d+)m/);
+  const secs = duration.match(/(\d+)s/);
+  if (minutes) seconds += parseInt(minutes[1], 10) * 60;
+  if (secs) seconds += parseInt(secs[1], 10);
+  return seconds || 60;
+}
 
-const formatDuration = (seconds: number): string => {
-  const value = Math.max(1, Math.round(seconds));
-  if (value % 3600 === 0) return `${value / 3600}h`;
-  if (value % 60 === 0) return `${value / 60}m`;
-  return `${value}s`;
-};
+function generateSvgPaths(stages: K6Stage[]) {
+  if (stages.length === 0) return { linePath: '', areaPath: '', points: [] };
 
-const parseStages = (script: string): K6Stage[] => {
-  const stagesMatch = script.match(/stages:\s*\[([\s\S]*?)\]/);
-  if (!stagesMatch) return [];
-  const stages: K6Stage[] = [];
-  const objects = stagesMatch[1].matchAll(/\{([\s\S]*?)\}/g);
-  for (const object of objects) {
-    const duration = object[1].match(/duration:\s*['"`]([^'"`]+)['"`]/)?.[1];
-    const target = object[1].match(/target:\s*(\d+)/)?.[1];
-    if (duration && target) stages.push({ duration, target: Number(target) });
+  const points: { x: number; y: number; vu: number; time: number; label: string }[] = [];
+  let currentTime = 0;
+  let maxVu = 0;
+  let maxTime = 0;
+
+  points.push({ x: 30, y: 130, vu: 0, time: 0, label: 'Start' });
+
+  stages.forEach((stage, index) => {
+    const durationSec = parseDurationToSeconds(stage.duration);
+    currentTime += durationSec;
+    maxVu = Math.max(maxVu, stage.target);
+    maxTime = Math.max(maxTime, currentTime);
+    points.push({
+      x: 0,
+      y: 0,
+      vu: stage.target,
+      time: currentTime,
+      label: `Stage ${index + 1}`,
+    });
+  });
+
+  const chartWidth = 340;
+  const chartHeight = 110;
+  const startX = 30;
+  const startY = 20;
+
+  points.forEach((point, index) => {
+    if (index === 0) return;
+    point.x = startX + (point.time / maxTime) * chartWidth;
+    point.y = startY + chartHeight - (point.vu / (maxVu || 1)) * chartHeight;
+  });
+
+  let linePath = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length; i++) {
+    linePath += ` L ${points[i].x} ${points[i].y}`;
   }
-  return stages;
-};
 
-const updateScriptStages = (script: string, stages: K6Stage[]): string => {
-  const body = stages.map((stage) => `        { duration: '${stage.duration}', target: ${stage.target} }`).join(',\n');
-  return script.replace(/stages:\s*\[[\s\S]*?\]/, `stages: [\n${body}\n      ]`);
-};
+  const areaPath = `${linePath} L ${points[points.length - 1].x} 130 L ${points[0].x} 130 Z`;
+  return { linePath, areaPath, points };
+}
 
-export default function K6StagesVisualEditor({ script, onChange }: { script: string; onChange: (script: string) => void }) {
+export default function K6StagesVisualEditor({ script, onChange, showStageList = false }: K6StagesVisualEditorProps) {
   const { t } = usePreferences();
-  const stages = parseStages(script);
-  const [draggedStage, setDraggedStage] = useState<number | null>(null);
+  const stages = useMemo(() => parseStagesFromScript(script), [script]);
+  const { linePath, areaPath, points } = useMemo(() => generateSvgPaths(stages), [stages]);
   const [hoveredPoint, setHoveredPoint] = useState<number | null>(null);
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [draggedStage, setDraggedStage] = useState<number | null>(null);
+  const chartRef = useRef<SVGSVGElement>(null);
+
+  const handleUpdateStages = useCallback(
+    (newStages: K6Stage[]) => {
+      onChange(updateStagesInScript(script, newStages));
+    },
+    [onChange, script],
+  );
+
+  const updateStageFromPointer = useCallback(
+    (event: React.PointerEvent<SVGSVGElement>) => {
+      if (draggedStage === null || !chartRef.current) return;
+
+      const rect = chartRef.current.getBoundingClientRect();
+      const relativeY = (event.clientY - rect.top) / rect.height;
+      const maxVu = Math.max(...stages.map((stage) => stage.target), 1);
+      const newTarget = Math.max(0, Math.round(maxVu * (1 - relativeY)));
+
+      const newStages = [...stages];
+      newStages[draggedStage] = { ...newStages[draggedStage], target: newTarget };
+      handleUpdateStages(newStages);
+    },
+    [draggedStage, handleUpdateStages, stages],
+  );
 
   if (stages.length === 0) return null;
 
-  const totalDuration = stages.reduce((total, stage) => total + parseDuration(stage.duration), 0);
-  const maxTime = Math.max(Math.ceil(totalDuration * 1.25), 60);
-  const maxTarget = Math.max(Math.ceil(Math.max(...stages.map((stage) => stage.target), 10) * 1.25), 10);
-  const points: ChartPoint[] = [{ x: 30, y: 130, time: 0, target: 0 }];
-  let elapsed = 0;
-  for (const stage of stages) {
-    elapsed += parseDuration(stage.duration);
-    points.push({
-      x: 30 + (elapsed / maxTime) * 340,
-      y: 130 - (stage.target / maxTarget) * 110,
-      time: elapsed,
-      target: stage.target,
-    });
-  }
-  const linePath = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
-  const areaPath = `${linePath} L ${points[points.length - 1].x} 130 L 30 130 Z`;
-
-  const updateFromPointer = (event: React.PointerEvent<SVGSVGElement>) => {
-    if (draggedStage === null || !svgRef.current) return;
-    const matrix = svgRef.current.getScreenCTM();
-    if (!matrix) return;
-    const cursor = svgRef.current.createSVGPoint();
-    cursor.x = event.clientX;
-    cursor.y = event.clientY;
-    const position = cursor.matrixTransform(matrix.inverse());
-    const x = Math.min(370, Math.max(30, position.x));
-    const y = Math.min(130, Math.max(20, position.y));
-    const target = Math.max(0, Math.round(((130 - y) / 110) * maxTarget));
-    const previousTotal = stages.slice(0, draggedStage).reduce((total, stage) => total + parseDuration(stage.duration), 0);
-    const requestedTotal = Math.round(((x - 30) / 340) * maxTime);
-    const currentDuration = parseDuration(stages[draggedStage].duration);
-    const nextDuration = draggedStage < stages.length - 1 ? parseDuration(stages[draggedStage + 1].duration) : 0;
-    const maximumTotal = draggedStage < stages.length - 1
-      ? previousTotal + currentDuration + nextDuration - 1
-      : maxTime;
-    const duration = Math.max(1, Math.min(maximumTotal - previousTotal, requestedTotal - previousTotal));
-    const nextStages = [...stages];
-    nextStages[draggedStage] = { duration: formatDuration(duration), target };
-    if (draggedStage < nextStages.length - 1) {
-      nextStages[draggedStage + 1] = {
-        ...nextStages[draggedStage + 1],
-        duration: formatDuration(currentDuration + nextDuration - duration),
-      };
-    }
-    onChange(updateScriptStages(script, nextStages));
-  };
-
   return (
-    <section className="bg-slate-950/40 p-4 rounded-2xl border border-slate-800/80 space-y-3">
-      <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-        <Activity className="w-4 h-4 text-purple-400" />
-        {t('visualStagesTitle')}
+    <div className="space-y-4 flex flex-col">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center space-x-2">
+          <Activity className="w-5 h-5 text-purple-500" />
+          <h4 className="text-sm font-bold text-white">{t('visualStagesTitle')}</h4>
+        </div>
       </div>
-      <svg
-        ref={svgRef}
-        viewBox="0 0 400 150"
-        className="w-full h-auto touch-none"
-        onPointerMove={updateFromPointer}
-        onPointerUp={() => setDraggedStage(null)}
-        onPointerCancel={() => setDraggedStage(null)}
-        aria-label={t('visualStagesTitle')}
-      >
-        <path d={areaPath} fill="rgba(168, 85, 247, 0.18)" />
-        <path d={linePath} fill="none" stroke="rgb(168, 85, 247)" strokeWidth="2" strokeLinecap="round" />
-        {points.map((point, index) => (
-          <g key={index}>
-            {index > 0 && (
+
+      <div className="bg-slate-950 border border-slate-850 rounded-2xl p-4 relative overflow-hidden">
+        <div className="absolute top-3 right-4 text-[10px] font-medium text-slate-400 bg-slate-900/80 px-2 py-1 rounded border border-slate-800">
+          {hoveredPoint !== null && points[hoveredPoint] ? (
+            <span>
+              {points[hoveredPoint].label}: <strong className="text-purple-400">{points[hoveredPoint].vu} VUs</strong> @{' '}
+              {formatSeconds(points[hoveredPoint].time)}
+            </span>
+          ) : (
+            <span>{t('visualChart')}</span>
+          )}
+        </div>
+
+        <svg
+          ref={chartRef}
+          viewBox="0 0 400 150"
+          className="w-full h-auto mt-4 touch-none"
+          onPointerMove={updateStageFromPointer}
+          onPointerUp={() => setDraggedStage(null)}
+          onPointerCancel={() => setDraggedStage(null)}
+        >
+          <defs>
+            <linearGradient id="k6ChartGradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgb(168, 85, 247)" stopOpacity="0.25" />
+              <stop offset="100%" stopColor="rgb(168, 85, 247)" stopOpacity="0.0" />
+            </linearGradient>
+          </defs>
+
+          <line x1="30" y1="20" x2="370" y2="20" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+          <line x1="30" y1="57" x2="370" y2="57" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+          <line x1="30" y1="94" x2="370" y2="94" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+          <line x1="30" y1="130" x2="370" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+          <line x1="30" y1="20" x2="30" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+          <line x1="143" y1="20" x2="143" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+          <line x1="256" y1="20" x2="256" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+          <line x1="370" y1="20" x2="370" y2="130" stroke="rgba(148, 163, 184, 0.05)" strokeWidth="1" />
+
+          {areaPath && <path d={areaPath} fill="url(#k6ChartGradient)" />}
+          {linePath && (
+            <path
+              d={linePath}
+              fill="none"
+              stroke="rgb(168, 85, 247)"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          )}
+
+          {points.map((point, idx) => (
+            <g key={idx}>
+              {idx > 0 && (
+                <circle
+                  cx={point.x}
+                  cy={point.y}
+                  r="12"
+                  fill="transparent"
+                  className="cursor-grab active:cursor-grabbing"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    chartRef.current?.setPointerCapture(event.pointerId);
+                    setDraggedStage(idx - 1);
+                    setHoveredPoint(idx);
+                  }}
+                />
+              )}
               <circle
                 cx={point.x}
                 cy={point.y}
-                r="12"
-                fill="transparent"
-                className="cursor-grab active:cursor-grabbing"
-                onPointerDown={(event) => {
-                  event.preventDefault();
-                  svgRef.current?.setPointerCapture(event.pointerId);
-                  setDraggedStage(index - 1);
-                  setHoveredPoint(index);
-                }}
+                r={hoveredPoint === idx || draggedStage === idx - 1 ? 6 : 4}
+                fill={idx === 0 ? 'rgb(148, 163, 184)' : 'rgb(168, 85, 247)'}
+                stroke="rgb(15, 23, 42)"
+                strokeWidth="2"
+                className={idx === 0 ? 'transition-all duration-150' : 'transition-all duration-150 cursor-grab active:cursor-grabbing'}
+                onMouseEnter={() => setHoveredPoint(idx)}
+                onMouseLeave={() => draggedStage === null && setHoveredPoint(null)}
               />
-            )}
-            <circle
-              cx={point.x}
-              cy={point.y}
-              r={hoveredPoint === index || draggedStage === index - 1 ? 6 : 4}
-              fill={index === 0 ? 'rgb(148, 163, 184)' : 'rgb(168, 85, 247)'}
-              stroke="rgb(15, 23, 42)"
-              strokeWidth="2"
-              className={index === 0 ? '' : 'cursor-grab active:cursor-grabbing'}
-              onMouseEnter={() => setHoveredPoint(index)}
-              onMouseLeave={() => draggedStage === null && setHoveredPoint(null)}
-            />
-          </g>
-        ))}
-      </svg>
-      {hoveredPoint !== null && points[hoveredPoint] && (
-        <p className="text-[11px] text-slate-400">
-          {hoveredPoint === 0 ? '0 VUs' : `${points[hoveredPoint].target} VUs · ${formatDuration(points[hoveredPoint].time)}`}
-        </p>
+            </g>
+          ))}
+        </svg>
+      </div>
+
+      {showStageList && (
+        <>
+          <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1 custom-scrollbar">
+            {stages.map((stage, idx) => (
+              <div
+                key={idx}
+                className="flex items-center space-x-3 bg-slate-950/60 border border-slate-850 p-3 rounded-xl hover:border-slate-800 transition"
+              >
+                <div className="flex-1 grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      {t('duration')}
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={stage.duration}
+                      onChange={(e) => {
+                        const newStages = [...stages];
+                        newStages[idx] = { ...newStages[idx], duration: e.target.value };
+                        handleUpdateStages(newStages);
+                      }}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:border-purple-500 outline-none font-mono"
+                      placeholder="e.g., 2m"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                      {t('targetVUs')}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      required
+                      value={stage.target}
+                      onChange={(e) => {
+                        const newStages = [...stages];
+                        newStages[idx] = { ...newStages[idx], target: parseInt(e.target.value, 10) || 0 };
+                        handleUpdateStages(newStages);
+                      }}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:border-purple-500 outline-none"
+                      placeholder="e.g., 50"
+                    />
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleUpdateStages(stages.filter((_, i) => i !== idx))}
+                  className="text-slate-500 hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/10 transition cursor-pointer mt-4"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              const lastStage = stages[stages.length - 1];
+              const newStage = lastStage
+                ? { duration: lastStage.duration, target: lastStage.target }
+                : { duration: '1m', target: 10 };
+              handleUpdateStages([...stages, newStage]);
+            }}
+            className="w-full py-2 border border-dashed border-slate-800 hover:border-purple-500/50 hover:bg-purple-500/5 text-purple-400 hover:text-purple-300 rounded-xl text-xs font-semibold transition flex items-center justify-center space-x-2 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>{t('addStage')}</span>
+          </button>
+        </>
       )}
-    </section>
+    </div>
   );
 }

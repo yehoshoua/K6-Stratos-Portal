@@ -16,6 +16,7 @@ const apiMock = vi.hoisted(() => ({
   getNamespaces: vi.fn(),
   resolveClusterImage: vi.fn(),
   createCRD: vi.fn(),
+  listFiles: vi.fn(),
 }));
 
 vi.mock("@/services/api", () => ({ api: apiMock }));
@@ -69,6 +70,7 @@ describe("K6TestWizard steps", () => {
     apiMock.resolveClusterImage.mockImplementation(
       async (_clusterId: string, image: string) => image,
     );
+    apiMock.listFiles.mockResolvedValue([]);
   });
 
   it("walks through template, target, load, resources, launch and review", async () => {

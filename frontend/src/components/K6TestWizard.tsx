@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarClock,
   Check,
@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 import PreflightPanel from "@/components/guardian/PreflightPanel";
-import K6StagesVisualEditor from "@/components/K6StagesVisualEditor";
+import K6ScriptEditor from "@/components/K6ScriptEditor";
 import { usePreferences } from "@/components/PreferencesContext";
 import { getK6WorkspaceCopy } from "@/i18n/k6Workspace";
 import { api, ClusterConfig, K6Template, RunDefaults } from "@/services/api";
@@ -123,6 +123,30 @@ export default function K6TestWizard({
   const [loading, setLoading] = useState(false);
   const [preflightOpen, setPreflightOpen] = useState(false);
 
+  const [datasetFiles, setDatasetFiles] = useState<string[]>([]);
+  const [availableFiles, setAvailableFiles] = useState<string[]>([]);
+  const [thresholds, setThresholds] = useState<{ metric: string; comparator: string; value: number }[]>([]);
+  const wizardSessionRef = useRef(0);
+  const allowAutoTemplateRef = useRef(true);
+
+  useEffect(() => {
+    if (open && step > 0) {
+      allowAutoTemplateRef.current = false;
+    }
+  }, [open, step]);
+
+  useEffect(() => {
+    const fetchAvailableFiles = async () => {
+      try {
+        const files = await api.listFiles();
+        setAvailableFiles((files || []).map((f: any) => f.filename));
+      } catch (err) {
+        console.error('Failed to load files', err);
+      }
+    };
+    fetchAvailableFiles();
+  }, []);
+
   const selectedTemplate = templates.find(
     (template) => template.id === templateId,
   );
@@ -157,13 +181,29 @@ export default function K6TestWizard({
       setClusterId("");
       setNamespace("");
       setNamespaces([]);
+      allowAutoTemplateRef.current = true;
       return;
     }
+
+    const session = wizardSessionRef.current + 1;
+    wizardSessionRef.current = session;
+    allowAutoTemplateRef.current = true;
 
     const timer = window.setTimeout(() => {
       setStep(0);
       setError("");
       setAction(initialAction);
+      setTemplateId("");
+      setName("");
+      setScript(FALLBACK_SCRIPT);
+      setParallelism(1);
+      setCpu("500m");
+      setMemory("512Mi");
+      setImage("");
+      setOutput("");
+      setEnvVars([]);
+      setThresholds([]);
+      setDatasetFiles([]);
       setClusterId("");
       setNamespace("");
       setNamespaces([]);
@@ -180,6 +220,7 @@ export default function K6TestWizard({
         })),
       ])
         .then(([clusterData, templateData, defaultData]) => {
+          if (wizardSessionRef.current !== session) return;
           const availableClusters = clusterData || [];
           setClusters(availableClusters);
           setTemplates(templateData || []);
@@ -190,7 +231,7 @@ export default function K6TestWizard({
           if (availableClusters[0]) {
             setClusterId(availableClusters[0].id);
           }
-          if (templateData[0]) {
+          if (templateData[0] && allowAutoTemplateRef.current) {
             applyTemplate(templateData[0], defaultData.env_vars);
           }
         })
@@ -253,8 +294,9 @@ export default function K6TestWizard({
   }, [script]);
 
   function applyTemplate(template: K6Template, defaultEnvVars?: { key: string; value: string }[]) {
+    allowAutoTemplateRef.current = false;
     setTemplateId(template.id);
-    setName((current) => current || sanitizeK8sName(template.name));
+    setName(sanitizeK8sName(template.name));
     const scriptContent = template.script_content || FALLBACK_SCRIPT;
     setScript(scriptContent);
     setParallelism(template.parallelism || 1);
@@ -326,6 +368,37 @@ export default function K6TestWizard({
     setStep((current) => Math.min(5, current + 1));
   };
 
+  const injectThresholdsToScript = (scriptText: string, thresholdsList: { metric: string; comparator: string; value: number }[]) => {
+    if (thresholdsList.length === 0) return scriptText;
+
+    const thresholdsObj: Record<string, string[]> = {};
+    thresholdsList.forEach(t => {
+      const expression = `${t.comparator}${t.value}`;
+      if (!thresholdsObj[t.metric]) {
+        thresholdsObj[t.metric] = [];
+      }
+      thresholdsObj[t.metric].push(expression);
+    });
+
+    const thresholdsJson = JSON.stringify(thresholdsObj, null, 2);
+
+    if (scriptText.includes('export const options =')) {
+      const optionsRegex = /export\s+const\s+options\s*=\s*\{([\s\S]*?)\};/;
+      const match = scriptText.match(optionsRegex);
+      if (match) {
+        const optionsBody = match[1];
+        if (optionsBody.includes('thresholds:')) {
+          return scriptText + `\n\n// Injected thresholds\nexport const options = { ...options, thresholds: ${thresholdsJson} };\n`;
+        } else {
+          const newOptionsBody = `  thresholds: ${thresholdsJson.replace(/\n/g, '\n  ')},\n` + optionsBody;
+          return scriptText.replace(optionsRegex, `export const options = {\n${newOptionsBody}\n};`);
+        }
+      }
+    }
+
+    return scriptText + `\n\nexport const options = {\n  thresholds: ${thresholdsJson.replace(/\n/g, '\n  ')}\n};\n`;
+  };
+
   const buildPayload = (validationRunId?: string, resolvedRunnerImage?: string) => {
     const resourceKind = action === "schedule" ? "cronjob" : launchKind;
     const scriptName =
@@ -340,11 +413,13 @@ export default function K6TestWizard({
       (rawRunnerImage
         ? resolveClusterImage(rawRunnerImage, clusterImageContext(selectedCluster))
         : defaultRunnerImage(selectedCluster));
+    const finalScript = injectThresholdsToScript(script, thresholds);
     const payload: Record<string, unknown> = {
       name: sanitizeK8sName(name),
-      scriptContent: script,
+      scriptContent: finalScript,
       resource_kind: resourceKind,
       active: action === "schedule" ? true : undefined,
+      datasetFiles: datasetFiles,
       spec: {
         parallelism,
         script: {
@@ -505,7 +580,7 @@ export default function K6TestWizard({
             </div>
           ) : (
             <div
-              className={`min-h-0 flex-1 pr-2 ${step === 1 ? "overflow-visible" : "overflow-y-auto"}`}
+              className={`min-h-0 flex-1 pr-2 ${step === 1 || step === 2 ? "overflow-visible" : "overflow-y-auto"}`}
             >
               {step === 0 && (
                 <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -593,23 +668,15 @@ export default function K6TestWizard({
               )}
 
               {step === 2 && (
-                <div className="space-y-4">
-                  {script.includes("stages") && (
-                    <K6StagesVisualEditor
-                      script={script}
-                      onChange={setScript}
-                    />
-                  )}
-                  <label className="block space-y-2 text-xs text-slate-400">
-                    <span>{copy.manualEditor}</span>
-                    <textarea
-                      value={script}
-                      onChange={(event) => setScript(event.target.value)}
-                      rows={13}
-                      spellCheck={false}
-                      className="w-full rounded-xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-200"
-                    />
-                  </label>
+                <div className="space-y-4 min-h-0">
+                  <K6ScriptEditor
+                    script={script}
+                    onChange={setScript}
+                    editorKey={templateId || "new-test"}
+                    label={copy.manualEditor}
+                    layout="split"
+                    height="360px"
+                  />
 
                   {/* Environment Variables */}
                   <div className="space-y-3 pt-4 border-t border-slate-800/80">
@@ -723,6 +790,159 @@ export default function K6TestWizard({
                         className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 font-mono text-slate-200"
                       />
                     </label>
+
+                    {/* Dataset Files Section */}
+                    <div className="md:col-span-2 space-y-3 pt-3 border-t border-slate-800/80">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                          Dataset Variable Files (CSV / JSON)
+                        </span>
+                        <label className="px-3 py-1 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 border border-purple-500/20 rounded-xl text-[10px] font-semibold cursor-pointer transition flex items-center gap-1.5">
+                          Upload File
+                          <input
+                            type="file"
+                            accept=".csv,.json"
+                            className="hidden"
+                            onChange={async (e) => {
+                              if (e.target.files && e.target.files[0]) {
+                                const fileObj = e.target.files[0];
+                                const fd = new FormData();
+                                fd.append('file', fileObj);
+                                try {
+                                  const res = await api.uploadFile(fd);
+                                  setAvailableFiles(prev => [...prev, res.filename]);
+                                  setDatasetFiles(prev => [...prev, res.filename]);
+                                } catch (err) {
+                                  alert(err instanceof Error ? err.message : 'Upload failed');
+                                }
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+
+                      {availableFiles.length === 0 ? (
+                        <p className="text-[11px] text-slate-500 italic">No files uploaded in this workspace yet.</p>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {availableFiles.map(fName => {
+                            const isSelected = datasetFiles.includes(fName);
+                            return (
+                              <button
+                                type="button"
+                                key={fName}
+                                onClick={() => {
+                                  if (isSelected) {
+                                    setDatasetFiles(prev => prev.filter(f => f !== fName));
+                                  } else {
+                                    setDatasetFiles(prev => [...prev, fName]);
+                                  }
+                                }}
+                                className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-mono transition flex items-center gap-1.5 cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-purple-500/10 border-purple-500/40 text-purple-400'
+                                    : 'bg-slate-950/40 border-slate-850 text-slate-400 hover:border-slate-800'
+                                }`}
+                              >
+                                <span className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-purple-400' : 'bg-slate-700'}`} />
+                                {fName}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* K6 Thresholds Editor Section */}
+                    <div className="md:col-span-2 space-y-4 pt-4 border-t border-slate-800/80">
+                      <span className="text-xs font-bold text-slate-300 uppercase tracking-wider block">
+                        K6 Thresholds Editor
+                      </span>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 bg-slate-950/40 p-3 rounded-2xl border border-slate-850">
+                        <div className="space-y-1">
+                          <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">Metric</label>
+                          <select
+                            id="threshold-metric"
+                            className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-purple-500/50 cursor-pointer"
+                          >
+                            <option value="http_req_duration">http_req_duration (p95 ms)</option>
+                            <option value="http_req_failed">http_req_failed (error rate)</option>
+                            <option value="http_reqs">http_reqs (total reqs)</option>
+                            <option value="vus">vus (VUs count)</option>
+                          </select>
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">Comparator</label>
+                          <select
+                            id="threshold-comparator"
+                            className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-purple-500/50 cursor-pointer"
+                          >
+                            <option value="&lt;">&lt;</option>
+                            <option value="&gt;">&gt;</option>
+                            <option value="&lt;=">&lt;=</option>
+                            <option value="&gt;=">&gt;=</option>
+                            <option value="==">==</option>
+                          </select>
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">Target Value</label>
+                          <input
+                            id="threshold-value"
+                            type="number"
+                            placeholder="e.g. 500"
+                            className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-purple-500/50"
+                          />
+                        </div>
+
+                        <div className="flex items-end">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const metricEl = document.getElementById('threshold-metric') as HTMLSelectElement;
+                              const compEl = document.getElementById('threshold-comparator') as HTMLSelectElement;
+                              const valEl = document.getElementById('threshold-value') as HTMLInputElement;
+                              if (metricEl && compEl && valEl && valEl.value) {
+                                const metric = metricEl.value;
+                                const comparator = compEl.value;
+                                const value = Number(valEl.value);
+                                setThresholds(prev => [...prev, { metric, comparator, value }]);
+                                valEl.value = '';
+                              }
+                            }}
+                            className="w-full py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-semibold cursor-pointer transition border border-purple-500/20"
+                          >
+                            Add Rule
+                          </button>
+                        </div>
+                      </div>
+
+                      {thresholds.length > 0 && (
+                        <div className="space-y-2">
+                          {thresholds.map((t, idx) => (
+                            <div key={idx} className="flex justify-between items-center bg-slate-950/20 px-4 py-2 rounded-xl border border-slate-850/60">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-bold text-purple-400 font-mono uppercase bg-purple-500/5 border border-purple-500/10 px-1.5 py-0.5 rounded">
+                                  {t.metric}
+                                </span>
+                                <span className="font-mono text-slate-300 text-xs">
+                                  {t.comparator} {t.value}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setThresholds(prev => prev.filter((_, i) => i !== idx))}
+                                className="text-[10px] text-red-400 hover:text-red-300 font-semibold cursor-pointer"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}

@@ -120,6 +120,7 @@ export default function CRDsPage() {
   const [logCrdName, setLogCrdName] = useState('');
   const [podsList, setPodsList] = useState<K8sPod[]>([]);
   const [loadingPods, setLoadingPods] = useState(false);
+  const [podMetrics, setPodMetrics] = useState<{ cpu: string; memory: string } | null>(null);
 
   const logsContainerRef = React.useRef<HTMLDivElement>(null);
 
@@ -548,6 +549,34 @@ export default function () {
       if (interval) clearInterval(interval);
     };
   }, [isLogsDrawerOpen, isLiveLogs, logsPodName, selectedCrd]);
+
+  // Handle polling for pod metrics
+  useEffect(() => {
+    if (!isLogsDrawerOpen || !logsPodName || !selectedClusterId) {
+      setPodMetrics(null);
+      return;
+    }
+
+    let active = true;
+    const fetchMetrics = async () => {
+      try {
+        const ns = selectedCrd?.metadata.namespace || namespace || 'default';
+        const data = await api.getPodMetrics(selectedClusterId, logsPodName, ns);
+        if (active) {
+          setPodMetrics(data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch pod metrics', err);
+      }
+    };
+
+    fetchMetrics();
+    const interval = setInterval(fetchMetrics, 3000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [isLogsDrawerOpen, logsPodName, selectedClusterId, selectedCrd, namespace]);
 
   const handleNamespaceChange = (val: string) => {
     if (val === '__custom__') {
@@ -2030,6 +2059,39 @@ export default function () {
             {logsError && (
               <div className="mb-4 p-3 bg-red-500/5 border border-red-500/10 rounded-xl text-red-400 text-xs">
                 {logsError}
+              </div>
+            )}
+
+            {/* Live Telemetry Resource Statistics */}
+            {podMetrics && (
+              <div className="mb-4 bg-slate-950/45 p-3.5 rounded-2xl border border-slate-850 flex items-center justify-around gap-4 animate-fadeIn">
+                <div className="flex-1 space-y-1.5">
+                  <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wide">
+                    <span>CPU Usage</span>
+                    <span className="text-purple-400 font-mono">{podMetrics.cpu}</span>
+                  </div>
+                  <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                    <div 
+                      className="bg-gradient-to-r from-purple-500 to-pink-500 h-full rounded-full transition-all duration-500" 
+                      style={{ width: `${Math.min(100, (parseInt(podMetrics.cpu) || 0) / 10)}%` }} 
+                    />
+                  </div>
+                </div>
+
+                <div className="w-px h-8 bg-slate-850" />
+
+                <div className="flex-1 space-y-1.5">
+                  <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wide">
+                    <span>Memory Usage</span>
+                    <span className="text-pink-400 font-mono">{podMetrics.memory}</span>
+                  </div>
+                  <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                    <div 
+                      className="bg-gradient-to-r from-pink-500 to-rose-500 h-full rounded-full transition-all duration-500" 
+                      style={{ width: `${Math.min(100, (parseInt(podMetrics.memory) || 0) / 10)}%` }} 
+                    />
+                  </div>
+                </div>
               </div>
             )}
 

@@ -50,7 +50,17 @@ Define target AWS accounts and their respective target regions using the `AWS_AC
 
 ```bash
 AWS_ACCOUNTS_DISCOVERY="123456789012#us-east-1;us-west-2;eu-west-1;ap-south-1,34567890123#us-east-2"
+# Optional — IAM role name assumed in each target account (default: StratosEKSDiscoveryRole)
+AWS_ACCOUNTS_DISCOVERY_ROLE="StratosEKSDiscoveryRole"
+# Optional — STS external ID for cross-account assume-role (default: StratosEKSDiscoveryExternalID)
+AWS_ACCOUNTS_DISCOVERY_EXTERNAL_ID="StratosEKSDiscoveryExternalID"
 ```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AWS_ACCOUNTS_DISCOVERY` | Yes | — | Target accounts and regions (`AccountID#region1;region2,...`) |
+| `AWS_ACCOUNTS_DISCOVERY_ROLE` | No | `StratosEKSDiscoveryRole` | IAM role name to assume in each target account |
+| `AWS_ACCOUNTS_DISCOVERY_EXTERNAL_ID` | No | `StratosEKSDiscoveryExternalID` | STS external ID passed to `AssumeRole` |
 
 ### Format Syntax:
 * Accounts are separated by commas (`,`).
@@ -65,10 +75,10 @@ AWS_ACCOUNTS_DISCOVERY="123456789012#us-east-1;us-west-2;eu-west-1;ap-south-1,34
 Attach the policy from `source-account-policy.json` to the Portal Backend's IAM Role (e.g. your EKS EKS-Pod IRSA role or EC2 Instance Profile):
 
 * **File:** [source-account-policy.json](source-account-policy.json)
-* **Action:** Allows the backend to perform `sts:AssumeRole` on roles named `StratosEKSDiscoveryRole` in any external AWS account.
+* **Action:** Allows the backend to perform `sts:AssumeRole` on the configured discovery role (default `StratosEKSDiscoveryRole`, overridable via `AWS_ACCOUNTS_DISCOVERY_ROLE`) in any external AWS account.
 
 ### Destination Accounts (Target/Satelite Accounts)
-Create an IAM Role named **`StratosEKSDiscoveryRole`** in **each target AWS account**.
+Create an IAM Role named **`StratosEKSDiscoveryRole`** (or the name set in `AWS_ACCOUNTS_DISCOVERY_ROLE`) in **each target AWS account**.
 
 1. **Trust Policy (AssumeRolePolicyDocument):**
    * **File:** [destination-account-trust-policy.json](destination-account-trust-policy.json)

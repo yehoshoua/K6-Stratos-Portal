@@ -241,14 +241,11 @@ func (s *Server) awsAccountIDFromDiscoveryConfig(ctx context.Context, c *Cluster
 	if c == nil {
 		return ""
 	}
-	envVal := os.Getenv("AWS_ACCOUNTS_DISCOVERY")
+	envVal := os.Getenv(discovery.EnvAccountsDiscovery)
 	if envVal == "" {
 		return ""
 	}
-	externalID := os.Getenv("AWS_ACCOUNTS_DISCOVERY_EXTERNAL_ID")
-	if externalID == "" {
-		externalID = "StratosEKSDiscoveryExternalID"
-	}
+	externalID := discovery.DiscoveryExternalID()
 	configs, err := discovery.ParseAWSAccountsEnv(envVal)
 	if err != nil || len(configs) == 0 {
 		return ""

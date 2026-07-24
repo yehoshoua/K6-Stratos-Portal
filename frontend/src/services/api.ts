@@ -16,9 +16,16 @@ async function apiFetch(url: string, options: RequestInit = {}): Promise<Respons
 }
 
 function getHeaders(): HeadersInit {
-  return {
-	'Content-Type': 'application/json',
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
   };
+  if (typeof window !== 'undefined') {
+    const ws = localStorage.getItem('active_workspace_id');
+    if (ws) {
+      headers['X-Workspace-ID'] = ws;
+    }
+  }
+  return headers;
 }
 
 export interface ClusterConfig {
@@ -33,6 +40,7 @@ export interface ClusterConfig {
   aws_account_id?: string;
   namespaces?: string;
   k6_operator_installed?: boolean;
+  workspace_id?: string;
 }
 
 export interface InfluxServerConfig {
@@ -71,6 +79,7 @@ export interface K6Template {
   schedule_active?: boolean;
   schedule_cluster_id?: string;
   schedule_namespace?: string;
+  workspace_id?: string;
 }
 
 export interface EcrCheck {
@@ -114,10 +123,25 @@ export interface TestAlert {
   timestamp: string;
 }
 
+export interface UserWorkspaceMembership {
+  workspace_id: string;
+  workspace_name?: string;
+  username: string;
+  role: string;
+  source?: 'manual' | 'sso' | string;
+}
+
 export interface User {
   username: string;
   role: string;
   created_at: string;
+  workspaces?: UserWorkspaceMembership[];
+}
+
+export interface WorkspaceGroupMapping {
+  workspace_id: string;
+  idp_group: string;
+  role: string;
 }
 
 export interface SSOConfig {
@@ -364,6 +388,162 @@ export const api = {
   async getClusterAddons(clusterId: string): Promise<{ name: string; current: string; recommended: string }[]> {
     const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/addons`, { headers: getHeaders() });
     if (!res.ok) return [];
+    return res.json();
+  },
+
+  async upgradeClusterAddon(clusterId: string, addonName: string, recommendedVersion: string): Promise<any> {
+    const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/addons/${addonName}/upgrade`, {
+      method: 'POST',
+      headers: { ...getHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recommended_version: recommendedVersion }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to upgrade addon' }));
+      throw new Error(err.error || 'Failed to upgrade addon');
+    }
+    return res.json();
+  },
+
+  async getPodMetrics(clusterId: string, podName: string, namespace: string): Promise<{ cpu: string; memory: string }> {
+    const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/pods/${podName}/metrics?namespace=${namespace}`, { headers: getHeaders() });
+    if (!res.ok) {
+      return { cpu: '0m', memory: '0Mi' };
+    }
+    return res.json();
+  },
+
+  async getWorkspaces(): Promise<{ id: string; name: string; created_at: string }[]> {
+    const res = await apiFetch(`${BASE_URL}/workspaces`, { headers: getHeaders() });
+    if (!res.ok) return [];
+    return res.json();
+  },
+
+  async createWorkspace(id: string, name: string): Promise<any> {
+    const res = await apiFetch(`${BASE_URL}/workspaces`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ id, name })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to create workspace');
+    }
+    return res.json();
+  },
+
+  async deleteWorkspace(id: string): Promise<any> {
+    const res = await apiFetch(`${BASE_URL}/workspaces/${id}`, {
+      method: 'DELETE',
+      headers: getHeaders()
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to delete workspace');
+    }
+    return res.json();
+  },
+
+  async getWorkspaceMembers(workspaceId: string): Promise<{ workspace_id: string; username: string; role: string; source?: string }[]> {
+    const res = await apiFetch(`${BASE_URL}/workspaces/${workspaceId}/members`, { headers: getHeaders() });
+    if (!res.ok) return [];
+    return res.json();
+  },
+
+  async addWorkspaceMember(workspaceId: string, username: string, role: string): Promise<any> {
+    const res = await apiFetch(`${BASE_URL}/workspaces/${workspaceId}/members`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ username, role })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to add workspace member');
+    }
+    return res.json();
+  },
+
+  async updateWorkspaceMember(workspaceId: string, username: string, role: string): Promise<any> {
+    const res = await apiFetch(`${BASE_URL}/workspaces/${workspaceId}/members/${encodeURIComponent(username)}`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify({ role }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to update workspace member');
+    }
+    return res.json();
+  },
+
+  async deleteWorkspaceMember(workspaceId: string, username: string): Promise<any> {
+    const res = await apiFetch(`${BASE_URL}/workspaces/${workspaceId}/members/${encodeURIComponent(username)}`, {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to remove workspace member');
+    }
+    return res.json();
+  },
+
+  async getWorkspaceGroupMappings(workspaceId: string): Promise<WorkspaceGroupMapping[]> {
+    const res = await apiFetch(`${BASE_URL}/workspaces/${workspaceId}/group-mappings`, { headers: getHeaders() });
+    if (!res.ok) return [];
+    return res.json();
+  },
+
+  async addWorkspaceGroupMapping(workspaceId: string, idpGroup: string, role: string): Promise<any> {
+    const res = await apiFetch(`${BASE_URL}/workspaces/${workspaceId}/group-mappings`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ idp_group: idpGroup, role }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to add SSO group mapping');
+    }
+    return res.json();
+  },
+
+  async deleteWorkspaceGroupMapping(workspaceId: string, idpGroup: string): Promise<any> {
+    const res = await apiFetch(`${BASE_URL}/workspaces/${workspaceId}/group-mappings/${encodeURIComponent(idpGroup)}`, {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to delete SSO group mapping');
+    }
+    return res.json();
+  },
+
+  async getUserWorkspaces(username: string): Promise<UserWorkspaceMembership[]> {
+    const res = await apiFetch(`${BASE_URL}/settings/users/${encodeURIComponent(username)}/workspaces`, { headers: getHeaders() });
+    if (!res.ok) return [];
+    return res.json();
+  },
+
+  async listFiles(): Promise<{ filename: string; size_bytes: number; uploaded_at: string }[]> {
+    const res = await apiFetch(`${BASE_URL}/files`, { headers: getHeaders() });
+    if (!res.ok) return [];
+    return res.json();
+  },
+
+  async uploadFile(formData: FormData): Promise<{ status: string; filename: string; path: string }> {
+    const headers = getHeaders();
+    if (headers && typeof headers === 'object' && 'Content-Type' in headers) {
+      delete (headers as any)['Content-Type'];
+    }
+    const res = await apiFetch(`${BASE_URL}/files/upload`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to upload file' }));
+      throw new Error(err.error || 'Failed to upload file');
+    }
     return res.json();
   },
 
@@ -709,6 +889,19 @@ export const api = {
     return res.json();
   },
 
+  async updateUser(username: string, user: { password?: string; role?: string }): Promise<User> {
+    const res = await apiFetch(`${BASE_URL}/settings/users/${encodeURIComponent(username)}`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(user),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Failed to update user' }));
+      throw new Error(err.error || 'Failed to update user');
+    }
+    return res.json();
+  },
+
   async deleteUser(username: string): Promise<void> {
     const res = await apiFetch(`${BASE_URL}/settings/users/${username}`, {
       method: 'DELETE',
@@ -949,6 +1142,29 @@ export const api = {
       image_url:   raw.image_url   ?? '',
       env_vars:    envVars,
     };
+  },
+
+  async getAppearanceSettings(): Promise<{
+    default_color_palette: string;
+    default_language: string;
+    default_theme: string;
+  }> {
+    const res = await fetch(`${BASE_URL}/settings/appearance`);
+    if (!res.ok) throw new Error('Failed to fetch appearance settings');
+    return res.json();
+  },
+
+  async saveAppearanceSettings(settings: {
+    default_color_palette: string;
+    default_language: string;
+    default_theme: string;
+  }): Promise<void> {
+    const res = await apiFetch(`${BASE_URL}/settings/appearance`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(settings),
+    });
+    if (!res.ok) throw new Error('Failed to save appearance settings');
   },
 
   async saveRunDefaults(d: RunDefaults): Promise<void> {

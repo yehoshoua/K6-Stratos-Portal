@@ -31,7 +31,33 @@ func TestNamespaceLabelSelector(t *testing.T) {
 	}
 
 	generic := &ClusterConfig{APIServerURL: "https://kubernetes.example.com"}
-	if got := namespaceLabelSelector(generic); got != "k6s=enabled" {
-		t.Fatalf("generic selector = %q, want k6s=enabled", got)
+	if got := namespaceLabelSelector(generic); got != "k6s" {
+		t.Fatalf("generic selector = %q, want k6s", got)
+	}
+}
+
+func TestIsNewerOrEqual(t *testing.T) {
+	tests := []struct {
+		current     string
+		recommended string
+		want        bool
+	}{
+		{current: "v1.18.5", recommended: "v1.18.1", want: true},
+		{current: "v1.18.1", recommended: "v1.18.5", want: false},
+		{current: "v1.18.1", recommended: "v1.18.1", want: true},
+		{current: "v1.18.1-eksbuild.3", recommended: "v1.18.1-eksbuild.1", want: true},
+		{current: "v1.18.1-eksbuild.1", recommended: "v1.18.1-eksbuild.3", want: false},
+		{current: "v1.18.1", recommended: "v1.18.1-eksbuild.1", want: false},
+		{current: "v1.18.1-eksbuild.1", recommended: "v1.18.1", want: true},
+		{current: "v1.19.0", recommended: "v1.18.5-eksbuild.12", want: true},
+		{current: "unknown", recommended: "v1.18.1", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.current+"_vs_"+tt.recommended, func(t *testing.T) {
+			if got := isNewerOrEqual(tt.current, tt.recommended); got != tt.want {
+				t.Fatalf("isNewerOrEqual(%q, %q) = %v, want %v", tt.current, tt.recommended, got, tt.want)
+			}
+		})
 	}
 }

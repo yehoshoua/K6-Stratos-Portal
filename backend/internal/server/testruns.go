@@ -7,9 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"os"
+	"path/filepath"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k6-bedrock-dashboard/backend/internal/database"
+	"k6-bedrock-dashboard/backend/internal/discovery"
 	"k6-bedrock-dashboard/backend/internal/k8s"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -183,6 +189,10 @@ func (s *Server) handleCreateCRD(w http.ResponseWriter, r *http.Request) {
 	if namespace == "" {
 		namespace = "default"
 	}
+	workspaceID := r.Header.Get("X-Workspace-ID")
+	if workspaceID == "" {
+		workspaceID = "default"
+	}
 
 	client, isMock, err := s.getClusterClient(id)
 	if err != nil {
@@ -199,6 +209,7 @@ func (s *Server) handleCreateCRD(w http.ResponseWriter, r *http.Request) {
 		Active          *bool                  `json:"active"`
 		Spec            map[string]interface{} `json:"spec"`
 		ValidationRunID string                 `json:"validation_run_id"`
+		DatasetFiles    []string               `json:"datasetFiles"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
@@ -253,6 +264,63 @@ func (s *Server) handleCreateCRD(w http.ResponseWriter, r *http.Request) {
 		if err := applyConfigMap(r.Context(), cmClient, cm); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to apply ConfigMap: %v"}`, err), http.StatusInternalServerError)
 			return
+		}
+	}
+
+	var datasetVolMounts []interface{}
+	var datasetVols []interface{}
+
+	if len(payload.DatasetFiles) > 0 {
+		cmData := make(map[string]string)
+		for _, fName := range payload.DatasetFiles {
+			safeName := filepath.Base(fName)
+			filePath := filepath.Join("data", "uploads", workspaceID, safeName)
+			content, err := os.ReadFile(filePath)
+			if err != nil {
+				if isMock {
+					cmData[safeName] = "mock,dataset,content"
+					continue
+				}
+				http.Error(w, fmt.Sprintf(`{"error":"dataset file %s not found"}`, safeName), http.StatusBadRequest)
+				return
+			}
+			cmData[safeName] = string(content)
+		}
+
+		datasetCMName := "dataset-" + payload.Name
+		if !isMock {
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      datasetCMName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						"k6s": "enabled",
+					},
+				},
+				Data: cmData,
+			}
+
+			cmClient := client.Clientset.CoreV1().ConfigMaps(namespace)
+			if err := applyConfigMap(r.Context(), cmClient, cm); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"failed to apply dataset ConfigMap: %v"}`, err), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		datasetVols = append(datasetVols, map[string]interface{}{
+			"name": "dataset-volume",
+			"configMap": map[string]interface{}{
+				"name": datasetCMName,
+			},
+		})
+
+		for _, fName := range payload.DatasetFiles {
+			safeName := filepath.Base(fName)
+			datasetVolMounts = append(datasetVolMounts, map[string]interface{}{
+				"name":      "dataset-volume",
+				"mountPath": "/datasets/" + safeName,
+				"subPath":   safeName,
+			})
 		}
 	}
 
@@ -468,6 +536,29 @@ func (s *Server) handleCreateCRD(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	if len(payload.DatasetFiles) > 0 {
+		datasetCMName := "dataset-" + payload.Name
+		jobSpec.Template.Spec.Volumes = append(jobSpec.Template.Spec.Volumes, corev1.Volume{
+			Name: "dataset-volume",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: datasetCMName,
+					},
+				},
+			},
+		})
+
+		for _, fName := range payload.DatasetFiles {
+			safeName := filepath.Base(fName)
+			jobSpec.Template.Spec.Containers[0].VolumeMounts = append(jobSpec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+				Name:      "dataset-volume",
+				MountPath: "/datasets/" + safeName,
+				SubPath:   safeName,
+			})
+		}
+	}
+
 	switch resourceKind {
 	case "testrun":
 		resourceName := sanitizeDNSLabel(payload.Name, maxDNSLabelLength)
@@ -475,6 +566,26 @@ func (s *Server) handleCreateCRD(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"invalid test run name"}`, http.StatusBadRequest)
 			return
 		}
+		if specMap != nil && len(payload.DatasetFiles) > 0 {
+			runnerMap, _ := specMap["runner"].(map[string]interface{})
+			if runnerMap == nil {
+				runnerMap = make(map[string]interface{})
+				specMap["runner"] = runnerMap
+			}
+
+			vols, _ := runnerMap["volumes"].([]interface{})
+			for _, v := range datasetVols {
+				vols = append(vols, v)
+			}
+			runnerMap["volumes"] = vols
+
+			mounts, _ := runnerMap["volumeMounts"].([]interface{})
+			for _, m := range datasetVolMounts {
+				mounts = append(mounts, m)
+			}
+			runnerMap["volumeMounts"] = mounts
+		}
+
 		obj := &unstructured.Unstructured{
 			Object: map[string]interface{}{
 				"apiVersion": "k6.io/v1alpha1",
@@ -1294,12 +1405,7 @@ func isAmazonEKSAPIEndpoint(rawURL string) bool {
 }
 
 func namespaceLabelSelector(clusterConfig *ClusterConfig) string {
-	if clusterConfig != nil && isAmazonEKSAPIEndpoint(clusterConfig.APIServerURL) {
-		// A key-only selector accepts every namespace carrying the k6s label,
-		// independently of its value (for example enabled, true or team name).
-		return "k6s"
-	}
-	return "k6s=enabled"
+	return "k6s"
 }
 
 func (s *Server) handleListNamespaces(w http.ResponseWriter, r *http.Request) {
@@ -1720,3 +1826,317 @@ func (s *Server) handleGetPodLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+type ClusterAddonInfo struct {
+	Name        string `json:"name"`
+	Current     string `json:"current"`
+	Recommended string `json:"recommended"`
+}
+
+func (s *Server) handleGetClusterAddons(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	client, isMock, err := s.getClusterClient(id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to connect to cluster: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	var addons []ClusterAddonInfo
+
+	// Fetch kubernetes version first
+	k8sVersion := s.queryKubernetesVersion(id)
+
+	if isMock {
+		addons = computeRecommendedAddons(k8sVersion)
+	} else {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		// 1. Check vpc-cni (daemonset aws-node in kube-system)
+		vpcCNIVersion := "unknown"
+		ds, err := client.Clientset.AppsV1().DaemonSets("kube-system").Get(ctx, "aws-node", metav1.GetOptions{})
+		if err == nil && isEKSManaged(ds.Labels, ds.ManagedFields) && len(ds.Spec.Template.Spec.Containers) > 0 {
+			vpcCNIVersion = extractVersionFromImage(ds.Spec.Template.Spec.Containers[0].Image)
+		}
+
+		// 2. Check coredns (deployment coredns in kube-system)
+		corednsVersion := "unknown"
+		dep, err := client.Clientset.AppsV1().Deployments("kube-system").Get(ctx, "coredns", metav1.GetOptions{})
+		if err == nil && isEKSManaged(dep.Labels, dep.ManagedFields) && len(dep.Spec.Template.Spec.Containers) > 0 {
+			corednsVersion = extractVersionFromImage(dep.Spec.Template.Spec.Containers[0].Image)
+		}
+
+		// 3. Check kube-proxy (daemonset kube-proxy in kube-system)
+		kubeProxyVersion := "unknown"
+		kp, err := client.Clientset.AppsV1().DaemonSets("kube-system").Get(ctx, "kube-proxy", metav1.GetOptions{})
+		if err == nil && isEKSManaged(kp.Labels, kp.ManagedFields) && len(kp.Spec.Template.Spec.Containers) > 0 {
+			kubeProxyVersion = extractVersionFromImage(kp.Spec.Template.Spec.Containers[0].Image)
+		}
+
+		// Build recommended versions dynamically
+		recommended := computeRecommendedAddons(k8sVersion)
+		for _, rAddon := range recommended {
+			currentVal := "unknown"
+			if rAddon.Name == "vpc-cni" && vpcCNIVersion != "unknown" {
+				currentVal = vpcCNIVersion
+			} else if rAddon.Name == "coredns" && corednsVersion != "unknown" {
+				currentVal = corednsVersion
+			} else if rAddon.Name == "kube-proxy" && kubeProxyVersion != "unknown" {
+				currentVal = kubeProxyVersion
+			}
+
+			// If it is not EKS managed, skip it completely!
+			if currentVal == "unknown" {
+				continue
+			}
+
+			recommendedVal := rAddon.Recommended
+			if isNewerOrEqual(currentVal, recommendedVal) {
+				recommendedVal = currentVal
+			}
+
+			addons = append(addons, ClusterAddonInfo{
+				Name:        rAddon.Name,
+				Current:     currentVal,
+				Recommended: recommendedVal,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(addons)
+}
+
+func (s *Server) handleUpgradeClusterAddon(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	addonName := r.PathValue("addon_name")
+
+	var input struct {
+		RecommendedVersion string `json:"recommended_version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if input.RecommendedVersion == "" {
+		http.Error(w, `{"error":"recommended_version is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	clusters, err := s.db.GetClusters()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to fetch clusters: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	var targetCluster *ClusterConfig
+	for _, c := range clusters {
+		if c.ID == id {
+			targetCluster = c
+			break
+		}
+	}
+
+	if targetCluster == nil {
+		http.Error(w, `{"error":"cluster not found"}`, http.StatusNotFound)
+		return
+	}
+
+	if targetCluster.AuthType == "mock" || targetCluster.APIServerURL == "mock" || strings.HasPrefix(targetCluster.APIServerURL, "mock") {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true,"message":"Mock addon upgrade initiated successfully"}`))
+		return
+	}
+
+	if targetCluster.AuthType != "eks-assume-role" {
+		http.Error(w, `{"error":"Addon upgrades are only supported for EKS clusters registered with IAM Role Assumption"}`, http.StatusBadRequest)
+		return
+	}
+
+	decryptedRoleARN, err := s.config.Decrypt(targetCluster.EncryptedData)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to decrypt AWS role ARN: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	externalID := discovery.DiscoveryExternalID()
+
+	err = discovery.UpgradeClusterAddon(
+		r.Context(),
+		discovery.AccountIDFromARN(string(decryptedRoleARN)),
+		targetCluster.Region,
+		targetCluster.Name,
+		addonName,
+		input.RecommendedVersion,
+		externalID,
+	)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to upgrade addon: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"success":true,"message":"Addon upgrade initiated successfully"}`))
+}
+
+func isEKSManaged(labels map[string]string, managedFields []metav1.ManagedFieldsEntry) bool {
+	if labels != nil {
+		if _, ok := labels["eks.amazonaws.com/addon-name"]; ok {
+			return true
+		}
+		if val := labels["app.kubernetes.io/managed-by"]; val == "aws-eks" || val == "EKS" {
+			return true
+		}
+	}
+	for _, field := range managedFields {
+		manager := strings.ToLower(field.Manager)
+		if strings.Contains(manager, "eks") {
+			return true
+		}
+	}
+	return false
+}
+
+func extractVersionFromImage(image string) string {
+	parts := strings.Split(image, ":")
+	if len(parts) < 2 {
+		return "unknown"
+	}
+	tag := parts[len(parts)-1]
+	// Remove leading v if present
+	if strings.HasPrefix(tag, "v") {
+		return tag
+	}
+	return tag
+}
+
+func computeRecommendedAddons(k8sVersion string) []ClusterAddonInfo {
+	version := k8sVersion
+	if version == "" {
+		version = "v1.30.0-eks"
+	}
+
+	if strings.Contains(version, "v1.35") || strings.Contains(version, "v1.34") || strings.Contains(version, "v1.33") {
+		return []ClusterAddonInfo{
+			{Name: "vpc-cni", Current: "v1.18.1", Recommended: "v1.19.2"},
+			{Name: "coredns", Current: "v1.11.3", Recommended: "v1.12.6"},
+			{Name: "kube-proxy", Current: "v1.32.0-eksbuild.1", Recommended: "v1.33.0-eksbuild.1"},
+		}
+	}
+
+	return []ClusterAddonInfo{
+		{Name: "vpc-cni", Current: "v1.16.0", Recommended: "v1.18.1"},
+		{Name: "coredns", Current: "v1.10.1", Recommended: "v1.11.3"},
+		{Name: "kube-proxy", Current: "v1.29.0-eksbuild.1", Recommended: "v1.30.0-eksbuild.1"},
+	}
+}
+
+func isNewerOrEqual(current, recommended string) bool {
+	cleanCurr := strings.TrimPrefix(current, "v")
+	cleanReco := strings.TrimPrefix(recommended, "v")
+
+	currPartsAndBuild := strings.Split(cleanCurr, "-")
+	recoPartsAndBuild := strings.Split(cleanReco, "-")
+
+	currVersion := currPartsAndBuild[0]
+	recoVersion := recoPartsAndBuild[0]
+
+	currBuild := ""
+	if len(currPartsAndBuild) > 1 {
+		currBuild = currPartsAndBuild[1]
+	}
+	recoBuild := ""
+	if len(recoPartsAndBuild) > 1 {
+		recoBuild = recoPartsAndBuild[1]
+	}
+
+	currParts := strings.Split(currVersion, ".")
+	recoParts := strings.Split(recoVersion, ".")
+
+	maxLen := len(currParts)
+	if len(recoParts) > maxLen {
+		maxLen = len(recoParts)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var cVal, rVal int
+		if i < len(currParts) {
+			cVal, _ = strconv.Atoi(currParts[i])
+		}
+		if i < len(recoParts) {
+			rVal, _ = strconv.Atoi(recoParts[i])
+		}
+		if cVal > rVal {
+			return true
+		}
+		if cVal < rVal {
+			return false
+		}
+	}
+
+	if currBuild == recoBuild {
+		return true
+	}
+	if currBuild == "" {
+		return false
+	}
+	if recoBuild == "" {
+		return true
+	}
+
+	cNum := extractNumber(currBuild)
+	rNum := extractNumber(recoBuild)
+	return cNum >= rNum
+}
+
+func extractNumber(s string) int {
+	reg := regexp.MustCompile(`\d+`)
+	match := reg.FindString(s)
+	if match != "" {
+		val, _ := strconv.Atoi(match)
+		return val
+	}
+	return 0
+}
+
+func (s *Server) handleGetPodMetrics(w http.ResponseWriter, r *http.Request) {
+	clusterID := r.PathValue("id")
+	podName := r.PathValue("pod_name")
+	namespace := r.URL.Query().Get("namespace")
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	client, isMock, err := s.getClusterClient(clusterID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	if isMock {
+		w.Header().Set("Content-Type", "application/json")
+		sec := time.Now().Second()
+		simulatedCPU := 100 + (sec % 40) * 5
+		simulatedMem := 250 + (sec % 10) * 4
+		json.NewEncoder(w).Encode(map[string]string{
+			"cpu":    fmt.Sprintf("%dm", simulatedCPU),
+			"memory": fmt.Sprintf("%dMi", simulatedMem),
+		})
+		return
+	}
+
+	metrics, err := client.GetPodMetrics(namespace, podName)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"cpu":    "0m",
+			"memory": "0Mi",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+

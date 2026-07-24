@@ -21,8 +21,40 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to get users: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
+	memberships, err := s.db.GetAllWorkspaceMemberships()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to get workspace memberships: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	byUser := make(map[string][]*database.UserWorkspaceMembership)
+	for _, membership := range memberships {
+		byUser[membership.Username] = append(byUser[membership.Username], membership)
+	}
+
+	type userResponse struct {
+		Username   string                               `json:"username"`
+		Role       string                               `json:"role"`
+		CreatedAt  time.Time                            `json:"created_at"`
+		Workspaces []*database.UserWorkspaceMembership `json:"workspaces"`
+	}
+
+	response := make([]userResponse, 0, len(list))
+	for _, user := range list {
+		workspaces := byUser[user.Username]
+		if workspaces == nil {
+			workspaces = []*database.UserWorkspaceMembership{}
+		}
+		response = append(response, userResponse{
+			Username:   user.Username,
+			Role:       user.Role,
+			CreatedAt:  user.CreatedAt,
+			Workspaces: workspaces,
+		})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
+	json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +118,95 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(newUser)
+}
+
+func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		http.Error(w, `{"error":"database not initialized"}`, http.StatusInternalServerError)
+		return
+	}
+
+	username := r.PathValue("username")
+	if username == "" {
+		http.Error(w, `{"error":"missing username"}`, http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		Password        string `json:"password"`
+		Role            string `json:"role"`
+		ValidationRunID string `json:"validation_run_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	existing, err := s.db.GetUser(username)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to get user: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	if existing == nil {
+		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+		return
+	}
+
+	role := existing.Role
+	if body.Role != "" {
+		role = body.Role
+	}
+
+	if body.Password == "" && body.Role == "" {
+		http.Error(w, `{"error":"nothing to update"}`, http.StatusBadRequest)
+		return
+	}
+
+	requestedBy := r.Header.Get("X-User-Name")
+	if body.Role != "" && body.Role != existing.Role {
+		rbacSubject := guardian.Subject{
+			Type:        guardian.SubjectRBACChange,
+			Ref:         username,
+			RequestedBy: requestedBy,
+			Payload: map[string]interface{}{
+				"role":            role,
+				"target_username": username,
+			},
+		}
+		if err := s.guardianGate(r.Context(), r, rbacSubject, body.ValidationRunID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusPreconditionFailed)
+			return
+		}
+	}
+
+	passwordHash := existing.PasswordHash
+	salt := existing.Salt
+	if body.Password != "" {
+		var hashErr error
+		passwordHash, hashErr = auth.HashPassword(body.Password)
+		if hashErr != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"failed to hash password: %v"}`, hashErr), http.StatusInternalServerError)
+			return
+		}
+		salt = ""
+	}
+
+	updated := &database.User{
+		Username:     username,
+		PasswordHash: passwordHash,
+		Salt:         salt,
+		Role:         role,
+		CreatedAt:    existing.CreatedAt,
+	}
+
+	if err := s.db.SaveUser(updated); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to save user: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	s.audit("user.update", requestedBy, username, map[string]interface{}{"role": role, "password_changed": body.Password != ""})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updated)
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {

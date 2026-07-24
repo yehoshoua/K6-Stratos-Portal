@@ -15,6 +15,16 @@ import {
 } from 'lucide-react';
 import { api, TestRunSummary, TelemetryPoint, InfluxServerConfig } from '@/services/api';
 import { usePreferences } from '@/components/PreferencesContext';
+import {
+  ResponsiveContainer,
+  LineChart as ReChartsLineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as ReChartsTooltip,
+  Legend as ReChartsLegend
+} from 'recharts';
 
 export default function MetricsPage() {
   const { t, lang } = usePreferences();
@@ -350,6 +360,31 @@ export default function MetricsPage() {
   };
 
   const chart = getChartData();
+
+  const getRechartsData = () => {
+    const runsList = Object.entries(multiPoints);
+    if (runsList.length === 0) return [];
+
+    const maxLength = Math.max(...runsList.map(([_, pts]) => pts.length));
+    const data = [];
+
+    for (let i = 0; i < maxLength; i++) {
+      const entry: any = { index: i + 1 };
+      runsList.forEach(([runKey, pts]) => {
+        const runId = runKey.split('|')[0];
+        const pt = pts[i];
+        if (pt) {
+          entry[runId] = pt.value;
+          if (!entry.timestamp) {
+            entry.timestamp = new Date(pt.timestamp).toLocaleTimeString();
+          }
+        }
+      });
+      data.push(entry);
+    }
+    return data;
+  };
+
   const allValues = Object.values(multiPoints).flatMap(pts => pts.map(p => p.value));
   let avgValue = '0';
   let maxValue = '0';
@@ -915,126 +950,58 @@ export default function MetricsPage() {
                 ))}
               </div>
 
-              {/* Legend for Compare Mode */}
-              {selectedRunKeys.length > 1 && (
-                <div className="flex flex-wrap gap-3 p-3.5 bg-slate-950/40 border border-slate-850 rounded-2xl text-[10px]">
-                  {chart.lines.map((line) => (
-                    <div key={line.runKey} className="flex items-center space-x-1.5">
-                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: line.color.stroke }} />
-                      <span className="text-slate-300 font-medium truncate max-w-[180px]" title={displayRunName(line.runKey)}>
-                        {displayRunName(line.runKey)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Responsive SVG Chart */}
-              <div className="relative bg-slate-950/60 rounded-2xl p-4 border border-slate-900 overflow-hidden flex-1 min-h-[300px] flex items-center justify-center chart-container-print">
+              {/* Responsive Recharts Comparison Chart */}
+              <div className="relative bg-slate-950/60 rounded-2xl p-4 border border-slate-900 overflow-hidden flex-1 min-h-[400px] flex items-center justify-center chart-container-print">
                 {loadingMetrics ? (
                   <div className="text-slate-500 text-sm">{t('chartLoading')}</div>
-                ) : chart.lines.length === 0 ? (
+                ) : Object.keys(multiPoints).length === 0 ? (
                   <div className="text-slate-500 text-sm">{t('chartNoData')}</div>
                 ) : (
-                  <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} className="w-full h-full text-slate-600">
-                    <defs>
-                      {chart.lines.map((line) => (
-                        <linearGradient key={line.runKey} id={`chartGradient-${line.color.id}`} x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor={line.color.stopColor} stopOpacity="0.25" />
-                          <stop offset="100%" stopColor={line.color.stopColor} stopOpacity="0.0" />
-                        </linearGradient>
-                      ))}
-                    </defs>
-
-                    {/* Y-axis gridlines */}
-                    {chart.gridY.map((g, idx) => (
-                      <g key={idx}>
-                        <line 
-                          x1={padding} 
-                          y1={g.y} 
-                          x2={svgWidth - padding} 
-                          y2={g.y} 
-                          stroke="#1E293B" 
-                          strokeWidth="1" 
-                          strokeDasharray="4 4"
-                        />
-                        <text 
-                          x={padding - 10} 
-                          y={g.y + 4} 
-                          fill="#64748B" 
-                          fontSize="9" 
-                          textAnchor="end"
-                          className="font-mono"
-                        >
-                          {metric === 'error_rate' 
-                            ? `${(g.val * 100).toFixed(1)}%` 
-                            : metric === 'http_req_duration' 
-                            ? `${g.val.toFixed(0)} ms` 
-                            : g.val.toFixed(0)}
-                        </text>
-                      </g>
-                    ))}
-
-                    {/* Gradients under curves */}
-                    {chart.lines.map((line) => (
-                      line.pointsList.length > 0 && (
-                        <path
-                          key={`grad-${line.runKey}`}
-                          d={`${line.path} L ${line.pointsList[line.pointsList.length - 1].x} ${svgHeight - padding} L ${line.pointsList[0].x} ${svgHeight - padding} Z`}
-                          fill={`url(#chartGradient-${line.color.id})`}
-                        />
-                      )
-                    ))}
-
-                    {/* Main smooth curves */}
-                    {chart.lines.map((line) => (
-                      <path
-                        key={`path-${line.runKey}`}
-                        d={line.path}
-                        fill="none"
-                        stroke={line.color.stroke}
-                        strokeWidth="2.5"
+                  <ResponsiveContainer width="100%" height={400}>
+                    <ReChartsLineChart data={getRechartsData()} margin={{ top: 20, right: 30, left: 10, bottom: 20 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
+                      <XAxis 
+                        dataKey="timestamp" 
+                        stroke="#64748B" 
+                        fontSize={10}
+                        tickLine={false}
                       />
-                    ))}
-
-                    {/* Interactive dots */}
-                    {chart.lines.map((line) => (
-                      line.pointsList.map((pt, idx) => (
-                        <circle
-                          key={`${line.runKey}-dot-${idx}`}
-                          cx={pt.x}
-                          cy={pt.y}
-                          r="3"
-                          fill="#0F172A"
-                          stroke={line.color.stroke}
-                          strokeWidth="1.5"
-                          className="hover:r-4 cursor-pointer transition-all"
-                        >
-                          <title>{`Run: ${displayRunName(line.runKey)}\nTime: ${pt.timestamp}\nValue: ${pt.value.toFixed(1)}`}</title>
-                        </circle>
-                      ))
-                    ))}
-
-                    {/* Bottom timestamps */}
-                    {chart.lines.length > 0 && chart.lines[0].pointsList.map((pt, idx) => {
-                      if (idx === 0 || idx === chart.lines[0].pointsList.length - 1 || idx === Math.floor(chart.lines[0].pointsList.length / 2)) {
+                      <YAxis 
+                        stroke="#64748B" 
+                        fontSize={10}
+                        tickLine={false}
+                        tickFormatter={(val: any) => {
+                          if (metric === 'error_rate') return `${(val * 100).toFixed(1)}%`;
+                          if (metric === 'http_req_duration') return `${val} ms`;
+                          return val;
+                        }}
+                      />
+                      <ReChartsTooltip 
+                        contentStyle={{ backgroundColor: '#0F172A', border: '1px solid #1E293B', borderRadius: '12px' }}
+                        labelStyle={{ fontSize: '11px', color: '#94A3B8', fontWeight: 'bold' }}
+                        itemStyle={{ fontSize: '11px', color: '#E2E8F0' }}
+                      />
+                      <ReChartsLegend 
+                        wrapperStyle={{ fontSize: '11px', paddingTop: '15px' }}
+                      />
+                      {Object.keys(multiPoints).map((runKey, idx) => {
+                        const runId = runKey.split('|')[0];
+                        const colors = ['#A855F7', '#EC4899', '#3B82F6', '#10B981'];
+                        const color = colors[idx % colors.length];
                         return (
-                          <text
-                             key={idx}
-                             x={pt.x}
-                             y={svgHeight - padding + 15}
-                             fill="#64748B"
-                             fontSize="9"
-                             textAnchor="middle"
-                             className="font-mono"
-                          >
-                            {pt.timestamp}
-                          </text>
+                          <Line
+                            key={runKey}
+                            type="monotone"
+                            dataKey={runId}
+                            stroke={color}
+                            activeDot={{ r: 6 }}
+                            strokeWidth={2.5}
+                            name={displayRunName(runKey)}
+                          />
                         );
-                      }
-                      return null;
-                    })}
-                  </svg>
+                      })}
+                    </ReChartsLineChart>
+                  </ResponsiveContainer>
                 )}
               </div>
             </>

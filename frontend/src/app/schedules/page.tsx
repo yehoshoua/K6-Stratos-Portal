@@ -17,10 +17,13 @@ import {
 	X,
 	FileDown,
 	Braces,
+	ChevronLeft,
+	ChevronRight,
 } from 'lucide-react';
 import { api, BatchWorkload, ClusterConfig, EcrCheck, K6Template } from '@/services/api';
 import { usePreferences } from '@/components/PreferencesContext';
 import { exportToCSV, exportToJSON } from '@/utils/export';
+import { nextCronOccurrences } from '@/utils/k6Operations';
 
 function sanitizeK8sName(name: string): string {
 	const cleaned = name
@@ -121,6 +124,151 @@ export default function SchedulesPage() {
 	const [error, setError] = useState('');
 	const [success, setSuccess] = useState('');
 	const [role, setRole] = useState('viewer');
+
+	const [viewMode, setViewMode] = useState<'list' | 'calendar'>('list');
+	const [currentDate, setCurrentDate] = useState(new Date());
+	const [selectedDayOccurrences, setSelectedDayOccurrences] = useState<{
+		date: Date;
+		runs: Array<{ workload: BatchWorkload; time: Date }>;
+	} | null>(null);
+
+	const localT = useCallback((key: string) => {
+		const translations: Record<string, Record<string, string>> = {
+			en: {
+				listView: 'List',
+				calendarView: 'Calendar',
+				prevMonth: 'Previous Month',
+				nextMonth: 'Next Month',
+				plannedRunsFor: 'Planned K6 Runs on',
+				noRunsPlanned: 'No K6 runs scheduled on this day.',
+				runsCount: 'runs',
+				timeLabel: 'Time',
+				actionLabel: 'Action',
+				runNowBtn: 'Run Now',
+				closeBtn: 'Close',
+			},
+			fr: {
+				listView: 'Liste',
+				calendarView: 'Calendrier',
+				prevMonth: 'Mois précédent',
+				nextMonth: 'Mois suivant',
+				plannedRunsFor: 'Tests K6 planifiés le',
+				noRunsPlanned: 'Aucun test K6 planifié ce jour.',
+				runsCount: 'tests',
+				timeLabel: 'Heure',
+				actionLabel: 'Action',
+				runNowBtn: 'Lancer',
+				closeBtn: 'Fermer',
+			},
+			es: {
+				listView: 'Lista',
+				calendarView: 'Calendario',
+				prevMonth: 'Mes anterior',
+				nextMonth: 'Siguiente mes',
+				plannedRunsFor: 'Pruebas K6 planificadas el',
+				noRunsPlanned: 'No hay pruebas K6 programadas para este día.',
+				runsCount: 'ejecuciones',
+				timeLabel: 'Hora',
+				actionLabel: 'Acción',
+				runNowBtn: 'Ejecutar',
+				closeBtn: 'Cerrar',
+			},
+			de: {
+				listView: 'Liste',
+				calendarView: 'Kalender',
+				prevMonth: 'Vorheriger Monat',
+				nextMonth: 'Nächster Monat',
+				plannedRunsFor: 'Geplante K6-Tests am',
+				noRunsPlanned: 'An diesem Tag sind keine K6-Tests geplant.',
+				runsCount: 'Läufe',
+				timeLabel: 'Uhrzeit',
+				actionLabel: 'Aktion',
+				runNowBtn: 'Ausführen',
+				closeBtn: 'Schließen',
+			},
+			he: {
+				listView: 'רשימה',
+				calendarView: 'לוח שנה',
+				prevMonth: 'חודש שעבר',
+				nextMonth: 'חודש הבא',
+				plannedRunsFor: 'הרצות K6 מתוכננות ב-',
+				noRunsPlanned: 'אין הרצות K6 מתוכננות ליום זה.',
+				runsCount: 'הרצות',
+				timeLabel: 'שעה',
+				actionLabel: 'פעולה',
+				runNowBtn: 'הרץ כעת',
+				closeBtn: 'סגור',
+			},
+			zh: {
+				listView: '列表',
+				calendarView: '日历',
+				prevMonth: '上个月',
+				nextMonth: '下个月',
+				plannedRunsFor: '计划的 K6 运行日期：',
+				noRunsPlanned: '此日没有计划的 K6 运行。',
+				runsCount: '次运行',
+				timeLabel: '时间',
+				actionLabel: '操作',
+				runNowBtn: '立即运行',
+				closeBtn: '关闭',
+			}
+		};
+		const langGroup = translations[lang] || translations['en'];
+		return langGroup[key] || key;
+	}, [lang]);
+
+	const startOfMonth = React.useMemo(() => new Date(currentDate.getFullYear(), currentDate.getMonth(), 1), [currentDate]);
+	const endOfMonth = React.useMemo(() => new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0), [currentDate]);
+
+	const calendarDays = React.useMemo(() => {
+		const days: Date[] = [];
+		const startDayOfWeek = startOfMonth.getDay();
+		
+		for (let i = startDayOfWeek - 1; i >= 0; i--) {
+			days.push(new Date(currentDate.getFullYear(), currentDate.getMonth(), -i));
+		}
+		
+		for (let i = 1; i <= endOfMonth.getDate(); i++) {
+			days.push(new Date(currentDate.getFullYear(), currentDate.getMonth(), i));
+		}
+		
+		const totalCells = Math.ceil(days.length / 7) * 7;
+		const nextMonthPadding = totalCells - days.length;
+		for (let i = 1; i <= nextMonthPadding; i++) {
+			days.push(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, i));
+		}
+		
+		return days;
+	}, [currentDate, startOfMonth, endOfMonth]);
+
+	const occurrencesMap = React.useMemo(() => {
+		const map: Record<string, Array<{ workload: BatchWorkload; time: Date }>> = {};
+		
+		const monthStart = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+		const monthEnd = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0, 23, 59, 59);
+
+		filteredWorkloads.forEach(w => {
+			const cron = w.spec?.schedule || w.spec?.cronExpression || '';
+			if (!cron || (w.kind || '').toLowerCase() !== 'cronjob') return;
+			
+			const occurrences = nextCronOccurrences(cron, monthStart, 150);
+			occurrences.forEach(date => {
+				if (date > monthEnd) return;
+				
+				const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+				if (!map[key]) {
+					map[key] = [];
+				}
+				map[key].push({ workload: w, time: date });
+			});
+		});
+		
+		Object.keys(map).forEach(key => {
+			map[key].sort((a, b) => a.time.getTime() - b.time.getTime());
+		});
+		
+		return map;
+	}, [filteredWorkloads, currentDate]);
 
 	const selectedTemplate = templates.find(tpl => tpl.id === templateId);
 	const editTemplate = templates.find(tpl => tpl.id === editTemplateId);
@@ -656,6 +804,31 @@ export default function SchedulesPage() {
 						</h3>
 
 						<div className="flex items-center gap-2 text-[11px]">
+							<div className="flex bg-slate-950/60 p-0.5 rounded-xl border border-slate-850 mr-1">
+								<button
+									type="button"
+									onClick={() => setViewMode('list')}
+									className={`px-2.5 py-1 rounded-lg transition-all text-[10px] font-semibold cursor-pointer ${
+										viewMode === 'list'
+											? 'bg-purple-600 text-white shadow-sm'
+											: 'text-slate-400 hover:text-slate-200'
+									}`}
+								>
+									{localT('listView')}
+								</button>
+								<button
+									type="button"
+									onClick={() => setViewMode('calendar')}
+									className={`px-2.5 py-1 rounded-lg transition-all text-[10px] font-semibold cursor-pointer ${
+										viewMode === 'calendar'
+											? 'bg-purple-600 text-white shadow-sm'
+											: 'text-slate-400 hover:text-slate-200'
+									}`}
+								>
+									{localT('calendarView')}
+								</button>
+							</div>
+
 							<select
 								value={filterCluster}
 								onChange={(e) => setFilterCluster(e.target.value)}
@@ -719,6 +892,94 @@ export default function SchedulesPage() {
 								? t('noSchedulesConfigured')
 								: t('noSchedulesMatchFilters')}
 						</div>
+					) : viewMode === 'calendar' ? (
+						<div className="space-y-4">
+							<div className="flex items-center justify-between bg-slate-950/40 p-3 rounded-2xl border border-slate-850">
+								<button
+									type="button"
+									onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1))}
+									className="p-1.5 border border-slate-805 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl transition cursor-pointer"
+								>
+									<ChevronLeft className="w-4 h-4" />
+								</button>
+								<span className="text-xs font-bold text-slate-200 uppercase tracking-wide">
+									{currentDate.toLocaleDateString(lang === 'fr' ? 'fr-FR' : 'en-US', { month: 'long', year: 'numeric' })}
+								</span>
+								<button
+									type="button"
+									onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1))}
+									className="p-1.5 border border-slate-805 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl transition cursor-pointer"
+								>
+									<ChevronRight className="w-4 h-4" />
+								</button>
+							</div>
+
+							<div className="grid grid-cols-7 gap-1 text-center text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+								{['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].map(day => (
+									<div key={day} className="py-1">
+										{lang === 'fr' 
+											? {sun: 'Dim', mon: 'Lun', tue: 'Mar', wed: 'Mer', thu: 'Jeu', fri: 'Ven', sat: 'Sam'}[day]
+											: day.toUpperCase()}
+									</div>
+								))}
+							</div>
+
+							<div className="grid grid-cols-7 gap-1.5">
+								{calendarDays.map((day, idx) => {
+									const isCurrentMonth = day.getMonth() === currentDate.getMonth();
+									const dayKey = `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
+									const dayRuns = occurrencesMap[dayKey] || [];
+									const isToday = new Date().toDateString() === day.toDateString();
+
+									return (
+										<div
+											key={idx}
+											onClick={() => {
+												if (dayRuns.length > 0) {
+													setSelectedDayOccurrences({ date: day, runs: dayRuns });
+												}
+											}}
+											className={`min-h-[70px] p-1.5 rounded-xl border transition flex flex-col justify-between ${
+												isCurrentMonth 
+													? 'bg-slate-950/40 border-slate-850/60 text-slate-200' 
+													: 'bg-slate-950/10 border-slate-900/40 text-slate-650'
+											} ${
+												isToday ? 'ring-1 ring-purple-500 border-purple-500' : ''
+											} ${
+												dayRuns.length > 0 ? 'hover:border-purple-650/80 hover:bg-purple-950/5 cursor-pointer' : ''
+											}`}
+										>
+											<div className="flex justify-between items-center">
+												<span className={`text-[10px] font-bold ${isToday ? 'text-purple-400' : ''}`}>
+													{day.getDate()}
+												</span>
+												{dayRuns.length > 0 && (
+													<span className="w-4 h-4 bg-purple-600/20 text-purple-400 text-[9px] font-bold rounded-full flex items-center justify-center">
+														{dayRuns.length}
+													</span>
+												)}
+											</div>
+											<div className="space-y-0.5 mt-1 overflow-hidden max-h-10">
+												{dayRuns.slice(0, 2).map((run, rIdx) => (
+													<div 
+														key={rIdx} 
+														title={run.workload.metadata.name}
+														className="text-[8px] truncate px-1 py-0.5 rounded bg-slate-800 text-slate-350 font-medium"
+													>
+														{run.workload.metadata.name}
+													</div>
+												))}
+												{dayRuns.length > 2 && (
+													<div className="text-[7px] text-slate-500 font-semibold pl-1">
+														+ {dayRuns.length - 2}
+													</div>
+												)}
+											</div>
+										</div>
+									);
+								})}
+							</div>
+						</div>
 					) : (
 						<div className="space-y-4 overflow-y-auto max-h-[600px] pr-1">
 							{filteredWorkloads.map((workload) => {
@@ -733,54 +994,49 @@ export default function SchedulesPage() {
 										<div className="space-y-2 min-w-0">
 											<div className="flex items-center gap-2 flex-wrap">
 												<span className="font-semibold text-sm text-white truncate">{workload.metadata.name}</span>
-												<span className="px-2 py-0.5 rounded-md text-[9px] font-bold border bg-slate-800/55 text-slate-400 border-slate-800 uppercase">
+												<span className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${
+													cron
+														? isActive
+															? 'bg-purple-950 text-purple-400 border border-purple-900/50'
+															: 'bg-slate-950 text-slate-500 border border-slate-900'
+														: 'bg-blue-950 text-blue-400 border border-blue-900/50'
+												}`}>
 													{cron ? t('cronJobLabel') : t('jobLabel')}
 												</span>
-												{cron && (
-													<span className={`px-2 py-0.5 rounded-md text-[9px] font-bold border ${
-														isActive
-															? 'bg-purple-500/10 text-purple-400 border-purple-500/20'
-															: 'bg-slate-800/55 text-slate-500 border-slate-800'
-													}`}>
-														{isActive ? t('active') : t('inactive')}
-													</span>
-												)}
 											</div>
-
 											<div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5 text-[10px] text-slate-400">
-												<div className="flex items-center gap-1">
+												<div className="flex items-center gap-1.5 min-w-0">
 													<Server className="w-3.5 h-3.5 text-slate-500 shrink-0" />
 													<span className="truncate">{getClusterName(workload.cluster_id)}</span>
 												</div>
-												<div className="flex items-center gap-1">
+												<div className="flex items-center gap-1.5 min-w-0">
 													<Layers className="w-3.5 h-3.5 text-slate-500 shrink-0" />
 													<span className="truncate">{workload.metadata.namespace}</span>
 												</div>
-												<div className="flex items-center gap-1 col-span-2 sm:col-span-1">
-													<Play className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+												<div className="flex items-center gap-1.5 min-w-0">
+													<Clock className="w-3.5 h-3.5 text-slate-500 shrink-0" />
 													<span className="truncate">{workload.spec?.script?.configMap?.name || '—'}</span>
 												</div>
 											</div>
-
-											{cron && workload.spec?.schedule ? (
-												<div className="text-[10px] text-slate-500 font-mono flex items-center gap-1">
-													<Clock className="w-3.5 h-3.5 text-slate-600 shrink-0" />
-													<span>{t('cronLabel')} {workload.spec.schedule}</span>
-												</div>
-											) : (
-												<div className="text-[10px] text-slate-500 font-mono flex items-center gap-1">
-													<Play className="w-3.5 h-3.5 text-slate-600 shrink-0" />
-													<span>{t('oneOffExecution')}</span>
+											{cron && workload.spec?.schedule && (
+												<div className="text-[10px] text-slate-500 font-medium font-mono flex items-center gap-1.5">
+													<span>{t('cronLabel')}</span>
+													<span className="bg-slate-950 px-2 py-0.5 rounded border border-slate-900 text-slate-400">{workload.spec.schedule}</span>
 												</div>
 											)}
 										</div>
 
 										{role !== 'viewer' && (
-											<div className="flex items-center space-x-2 shrink-0">
+											<div className="flex items-center gap-2 self-end sm:self-center shrink-0">
 												{cron && (
 													<button
-														onClick={() => handleEditClick(workload)}
-														className="p-2 border border-slate-850 hover:bg-purple-500/10 text-slate-500 hover:text-purple-400 rounded-xl transition cursor-pointer self-start sm:self-center"
+														onClick={() => {
+															setEditingWorkload(workload);
+															setEditTemplateId(findTemplateForWorkload(workload, templates));
+															setEditCronExpr(workload.spec?.schedule || '');
+															setEditActive(workload.status?.suspended !== true);
+														}}
+														className="p-2 border border-slate-850 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-xl transition cursor-pointer"
 														title={t('editSchedule')}
 													>
 														<Pencil className="w-4 h-4" />
@@ -789,7 +1045,7 @@ export default function SchedulesPage() {
 												<button
 													onClick={() => handleRunWorkload(workload)}
 													disabled={runningKeys.includes(key)}
-													className="p-2 border border-slate-850 hover:bg-emerald-500/10 text-slate-500 hover:text-emerald-400 rounded-xl transition cursor-pointer self-start sm:self-center disabled:opacity-50"
+													className="p-2 border border-slate-850 hover:bg-purple-650/10 text-purple-400 disabled:opacity-50 rounded-xl transition cursor-pointer"
 													title={t('runScheduleNow')}
 												>
 													<Play className="w-4 h-4" />
@@ -797,15 +1053,11 @@ export default function SchedulesPage() {
 												{cron && (
 													<button
 														onClick={() => handleToggleWorkload(workload)}
-														className={`p-2 border border-slate-850 rounded-xl transition cursor-pointer self-start sm:self-center ${
-															isActive
-																? 'hover:bg-purple-500/10 text-purple-400'
-																: 'hover:bg-slate-800 text-slate-500'
-														}`}
+														className="p-2 border border-slate-850 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-xl transition cursor-pointer"
 														title={isActive ? t('pauseSchedule') : t('resumeSchedule')}
 													>
 														{isActive ? (
-															<ToggleRight className="w-4 h-4" />
+															<ToggleRight className="w-4 h-4 text-purple-400" />
 														) : (
 															<ToggleLeft className="w-4 h-4 text-slate-500" />
 														)}
@@ -813,7 +1065,7 @@ export default function SchedulesPage() {
 												)}
 												<button
 													onClick={() => handleDeleteWorkload(workload)}
-													className="p-2 border border-slate-850 hover:bg-red-500/10 text-slate-500 hover:text-red-400 rounded-xl transition cursor-pointer self-start sm:self-center"
+													className="p-2 border border-slate-850 hover:bg-red-500/10 text-slate-500 hover:text-red-400 rounded-xl transition cursor-pointer"
 													title={t('deleteWorkloadTitle')}
 												>
 													<Trash className="w-4 h-4" />
@@ -920,6 +1172,74 @@ export default function SchedulesPage() {
 								className="flex-1 py-2 bg-gradient-to-r from-purple-600 to-pink-500 text-white rounded-xl text-xs font-semibold shadow-lg transition cursor-pointer hover:from-purple-500 hover:to-pink-400"
 							>
 								{t('confirm')}
+							</button>
+						</div>
+					</div>
+				</div>
+			)}
+
+			{selectedDayOccurrences && (
+				<div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
+					<div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-6 shadow-2xl space-y-4 relative">
+						<button
+							type="button"
+							onClick={() => setSelectedDayOccurrences(null)}
+							className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 p-1 cursor-pointer"
+						>
+							<X className="w-5 h-5" />
+						</button>
+
+						<div>
+							<h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+								<Calendar className="w-5 h-5 text-purple-400" />
+								<span>{localT('plannedRunsFor')} {selectedDayOccurrences.date.toLocaleDateString(lang === 'fr' ? 'fr-FR' : 'en-US', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
+							</h3>
+						</div>
+
+						<div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
+							{selectedDayOccurrences.runs.map((run, idx) => {
+								const key = workloadKey(run.workload);
+								const isRunning = runningKeys.includes(key);
+								return (
+									<div key={idx} className="bg-slate-950/50 border border-slate-850 p-3 rounded-2xl flex items-center justify-between gap-4">
+										<div className="space-y-1 min-w-0">
+											<div className="flex items-center gap-2">
+												<span className="font-semibold text-xs text-white truncate">{run.workload.metadata.name}</span>
+												<span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-950 text-purple-400 font-mono">
+													{run.time.toLocaleTimeString(lang === 'fr' ? 'fr-FR' : 'en-US', { hour: '2-digit', minute: '2-digit' })}
+												</span>
+											</div>
+											<div className="text-[10px] text-slate-400 truncate">
+												{getClusterName(run.workload.cluster_id)} • {run.workload.metadata.namespace}
+											</div>
+											<div className="text-[10px] text-slate-500 font-mono">
+												{run.workload.spec?.schedule || run.workload.spec?.cronExpression}
+											</div>
+										</div>
+
+										<button
+											type="button"
+											onClick={async () => {
+												await handleRunWorkload(run.workload);
+											}}
+											disabled={isRunning}
+											className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-[10px] font-bold shadow-md cursor-pointer transition flex items-center gap-1 shrink-0 disabled:opacity-50"
+										>
+											<Play className="w-3 h-3" />
+											<span>{isRunning ? t('saving') : localT('runNowBtn')}</span>
+										</button>
+									</div>
+								);
+							})}
+						</div>
+
+						<div className="flex justify-end pt-2">
+							<button
+								type="button"
+								onClick={() => setSelectedDayOccurrences(null)}
+								className="px-4 py-2 border border-slate-850 hover:bg-slate-800 text-slate-300 rounded-xl text-xs font-semibold transition cursor-pointer"
+							>
+								{localT('closeBtn')}
 							</button>
 						</div>
 					</div>

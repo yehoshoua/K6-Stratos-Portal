@@ -33,6 +33,13 @@ export default function Sidebar() {
   const [role, setRole] = React.useState('administrator');
   const [collapsed, setCollapsed] = React.useState(false);
 
+  interface Workspace {
+    id: string;
+    name: string;
+  }
+  const [workspaces, setWorkspaces] = React.useState<Workspace[]>([]);
+  const [activeWorkspaceId, setActiveWorkspaceId] = React.useState('default');
+
   React.useEffect(() => {
     const timer = window.setTimeout(() => {
       const storedUser = localStorage.getItem('username');
@@ -47,6 +54,34 @@ export default function Sidebar() {
     return () => window.clearTimeout(timer);
   }, []);
 
+  React.useEffect(() => {
+    const fetchWorkspaces = async () => {
+      try {
+        const stored = localStorage.getItem('active_workspace_id');
+        if (stored) {
+          setActiveWorkspaceId(stored);
+        } else {
+          localStorage.setItem('active_workspace_id', 'default');
+        }
+
+        const list = await api.getWorkspaces();
+        if (list && list.length > 0) {
+          setWorkspaces(list);
+          if (stored && !list.some((w: any) => w.id === stored)) {
+            setActiveWorkspaceId(list[0].id);
+            localStorage.setItem('active_workspace_id', list[0].id);
+          }
+        } else {
+          setWorkspaces([{ id: 'default', name: 'Default Workspace' }]);
+        }
+      } catch (err) {
+        console.error('Failed to load workspaces', err);
+        setWorkspaces([{ id: 'default', name: 'Default Workspace' }]);
+      }
+    };
+    fetchWorkspaces();
+  }, []);
+
   const menuItems = [
     { name: t('dashboard'), href: '/', icon: LayoutDashboard },
     { name: k6Copy.title, href: '/tests', icon: Activity },
@@ -54,8 +89,8 @@ export default function Sidebar() {
     { name: t('influxdb'), href: '/metrics', icon: BarChart3 },
   ];
 
-  // Dynamically append Settings menu if administrator
-  if (role === 'administrator') {
+  // Dynamically append Settings for all authenticated users
+  if (role) {
     menuItems.push({ name: t('settings'), href: '/settings', icon: Settings });
   }
 
@@ -103,6 +138,33 @@ export default function Sidebar() {
             {collapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
           </button>
         </div>
+
+        {/* Workspace Context Selector */}
+        {!collapsed && (
+          <div className="px-6 py-3 border-b border-slate-800/80 bg-slate-950/20">
+            <label className="block text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+              Workspace
+            </label>
+            <div className="relative">
+              <select
+                value={activeWorkspaceId}
+                onChange={(e) => {
+                  const wsId = e.target.value;
+                  setActiveWorkspaceId(wsId);
+                  localStorage.setItem('active_workspace_id', wsId);
+                  window.location.reload();
+                }}
+                className="w-full bg-slate-950/80 border border-slate-850 hover:border-slate-800 text-xs text-slate-305 px-3 py-2 rounded-xl outline-none focus:border-purple-500/50 transition cursor-pointer font-medium"
+              >
+                {workspaces.map((ws) => (
+                  <option key={ws.id} value={ws.id}>
+                    {ws.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
 
         {/* Navigation Menu */}
         <nav className={`p-4 space-y-1 ${collapsed ? 'items-center' : ''}`}>

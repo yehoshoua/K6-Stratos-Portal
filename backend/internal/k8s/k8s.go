@@ -483,3 +483,95 @@ func NewClientFromAssumeRole(ctx context.Context, apiServerURL string, caCertBas
 		DynamicClient: dynClient,
 	}, nil
 }
+
+// GetPodMetrics fetches CPU and Memory utilization for a pod using Metrics Server API via DynamicClient
+func (c *EKSClusterClient) GetPodMetrics(namespace, podName string) (map[string]string, error) {
+	gvr := schema.GroupVersionResource{
+		Group:    "metrics.k8s.io",
+		Version:  "v1beta1",
+		Resource: "pods",
+	}
+
+	unstructuredMetrics, err := c.DynamicClient.Resource(gvr).Namespace(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch pod metrics: %w", err)
+	}
+
+	containers, found, err := unstructured.NestedSlice(unstructuredMetrics.Object, "containers")
+	if err != nil || !found {
+		return nil, fmt.Errorf("failed to parse containers metrics: %v", err)
+	}
+
+	usage := map[string]string{
+		"cpu":    "0m",
+		"memory": "0Mi",
+	}
+
+	var totalCPU int64
+	var totalMem int64
+
+	for _, cObj := range containers {
+		container, ok := cObj.(map[string]any)
+		if !ok {
+			continue
+		}
+		cUsage, found, err := unstructured.NestedMap(container, "usage")
+		if err != nil || !found {
+			continue
+		}
+
+		cpuStr, _ := cUsage["cpu"].(string)
+		memStr, _ := cUsage["memory"].(string)
+
+		cpuVal := parseCPUMillis(cpuStr)
+		totalCPU += cpuVal
+
+		memVal := parseMemoryBytes(memStr)
+		totalMem += memVal
+	}
+
+	usage["cpu"] = fmt.Sprintf("%dm", totalCPU)
+	usage["memory"] = fmt.Sprintf("%dMi", totalMem/(1024*1024))
+
+	return usage, nil
+}
+
+func parseCPUMillis(cpuStr string) int64 {
+	if cpuStr == "" {
+		return 0
+	}
+	if strings.HasSuffix(cpuStr, "m") {
+		var val int64
+		fmt.Sscanf(cpuStr, "%dm", &val)
+		return val
+	}
+	if strings.HasSuffix(cpuStr, "n") {
+		var val int64
+		fmt.Sscanf(cpuStr, "%dn", &val)
+		return val / 1000000
+	}
+	var val float64
+	fmt.Sscanf(cpuStr, "%f", &val)
+	return int64(val * 1000)
+}
+
+func parseMemoryBytes(memStr string) int64 {
+	if memStr == "" {
+		return 0
+	}
+	var val int64
+	if strings.HasSuffix(memStr, "Ki") {
+		fmt.Sscanf(memStr, "%dKi", &val)
+		return val * 1024
+	}
+	if strings.HasSuffix(memStr, "Mi") {
+		fmt.Sscanf(memStr, "%dMi", &val)
+		return val * 1024 * 1024
+	}
+	if strings.HasSuffix(memStr, "Gi") {
+		fmt.Sscanf(memStr, "%dGi", &val)
+		return val * 1024 * 1024 * 1024
+	}
+	fmt.Sscanf(memStr, "%d", &val)
+	return val
+}

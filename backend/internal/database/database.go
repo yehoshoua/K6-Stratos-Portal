@@ -33,6 +33,7 @@ type ClusterConfig struct {
 	AWSAccountID        string    `json:"aws_account_id,omitempty"` // AWS Account ID for ECR image resolution
 	Environment         string    `json:"environment,omitempty"`    // dev | stage | prod | sandbox — drives Guardian production safety checks
 	K6OperatorInstalled bool      `json:"k6_operator_installed"`
+	WorkspaceID         string    `json:"workspace_id,omitempty"`
 }
 
 type InfluxConfig struct {
@@ -45,7 +46,7 @@ type InfluxConfig struct {
 	Bucket    string    `json:"bucket"`
 	Username  string    `json:"username,omitempty"`
 	Password  string    `json:"password,omitempty"`
-	Method    string    `json:"method,omitempty"` // "GET" or "POST"
+	Method    string    `json:"method,omitempty"` // "token" or "basic"
 	IsActive  bool      `json:"is_active"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -74,6 +75,7 @@ type K6Template struct {
 	ScheduleActive         bool      `json:"schedule_active"`
 	ScheduleClusterID      string    `json:"schedule_cluster_id"`
 	ScheduleNamespace      string    `json:"schedule_namespace"`
+	WorkspaceID            string    `json:"workspace_id,omitempty"`
 }
 
 type TestSchedule struct {
@@ -367,6 +369,13 @@ func (db *DB) createTables() error {
 		return fmt.Errorf("failed to create test_alerts table: %w", err)
 	}
 
+	if err := db.ensureWorkspaceTablesAndColumns(); err != nil {
+		return fmt.Errorf("failed to initialize workspaces: %w", err)
+	}
+	if err := db.ensureWorkspaceAccessTables(); err != nil {
+		return fmt.Errorf("failed to initialize workspace access: %w", err)
+	}
+
 	// Seed default administrator user if users table is empty. Hashed
 	// with bcrypt like every other password from day one — there is no
 	// legacy SHA-256 seed to migrate here.
@@ -549,13 +558,15 @@ func (db *DB) createTables() error {
 	return nil
 }
 
-
 func (db *DB) SaveCluster(c *ClusterConfig) error {
+	if c.WorkspaceID == "" {
+		c.WorkspaceID = "default"
+	}
 	var query string
 	if db.driver == "postgres" {
 		query = `
-		INSERT INTO clusters (id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, aws_account_id, environment)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		INSERT INTO clusters (id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, aws_account_id, environment, workspace_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			api_server_url = EXCLUDED.api_server_url,
@@ -567,19 +578,20 @@ func (db *DB) SaveCluster(c *ClusterConfig) error {
 			region = EXCLUDED.region,
 			namespaces = EXCLUDED.namespaces,
 			aws_account_id = EXCLUDED.aws_account_id,
-			environment = EXCLUDED.environment;`
+			environment = EXCLUDED.environment,
+			workspace_id = EXCLUDED.workspace_id;`
 	} else {
 		query = `
-		INSERT OR REPLACE INTO clusters (id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, aws_account_id, environment)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+		INSERT OR REPLACE INTO clusters (id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, aws_account_id, environment, workspace_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	}
 
-	_, err := db.conn.Exec(query, c.ID, c.Name, c.APIServerURL, c.AuthType, c.EncryptedData, c.CACertBase64, c.CreatedAt, c.KubernetesVersion, c.Region, c.Namespaces, c.AWSAccountID, c.Environment)
+	_, err := db.conn.Exec(query, c.ID, c.Name, c.APIServerURL, c.AuthType, c.EncryptedData, c.CACertBase64, c.CreatedAt, c.KubernetesVersion, c.Region, c.Namespaces, c.AWSAccountID, c.Environment, c.WorkspaceID)
 	return err
 }
 
 func (db *DB) GetClusters() ([]*ClusterConfig, error) {
-	query := db.rebind(`SELECT id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, COALESCE(aws_account_id,''), COALESCE(environment,'') FROM clusters;`)
+	query := db.rebind(`SELECT id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, COALESCE(aws_account_id,''), COALESCE(environment,''), COALESCE(workspace_id,'') FROM clusters;`)
 	rows, err := db.conn.Query(query)
 	if err != nil {
 		return nil, err
@@ -589,7 +601,27 @@ func (db *DB) GetClusters() ([]*ClusterConfig, error) {
 	list := make([]*ClusterConfig, 0)
 	for rows.Next() {
 		var c ClusterConfig
-		err := rows.Scan(&c.ID, &c.Name, &c.APIServerURL, &c.AuthType, &c.EncryptedData, &c.CACertBase64, &c.CreatedAt, &c.KubernetesVersion, &c.Region, &c.Namespaces, &c.AWSAccountID, &c.Environment)
+		err := rows.Scan(&c.ID, &c.Name, &c.APIServerURL, &c.AuthType, &c.EncryptedData, &c.CACertBase64, &c.CreatedAt, &c.KubernetesVersion, &c.Region, &c.Namespaces, &c.AWSAccountID, &c.Environment, &c.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, &c)
+	}
+	return list, nil
+}
+
+func (db *DB) GetClustersByWorkspace(workspaceID string) ([]*ClusterConfig, error) {
+	query := db.rebind(`SELECT id, name, api_server_url, auth_type, encrypted_data, ca_cert_base64, created_at, kubernetes_version, region, namespaces, COALESCE(aws_account_id,''), COALESCE(environment,''), COALESCE(workspace_id,'') FROM clusters WHERE workspace_id = ?;`)
+	rows, err := db.conn.Query(query, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := make([]*ClusterConfig, 0)
+	for rows.Next() {
+		var c ClusterConfig
+		err := rows.Scan(&c.ID, &c.Name, &c.APIServerURL, &c.AuthType, &c.EncryptedData, &c.CACertBase64, &c.CreatedAt, &c.KubernetesVersion, &c.Region, &c.Namespaces, &c.AWSAccountID, &c.Environment, &c.WorkspaceID)
 		if err != nil {
 			return nil, err
 		}
@@ -737,6 +769,9 @@ func (db *DB) SaveTemplate(t *K6Template) error {
 	if t.TemplateType == "" {
 		t.TemplateType = TemplateTypeTestRun
 	}
+	if t.WorkspaceID == "" {
+		t.WorkspaceID = "default"
+	}
 
 	var query string
 	if db.driver == "postgres" {
@@ -744,9 +779,9 @@ func (db *DB) SaveTemplate(t *K6Template) error {
 		INSERT INTO k6_templates (
 			id, name, template_type, parallelism, script_name, script_file, runner_image, cpu_limit, mem_limit,
 			script_content, created_at, sla_thresholds, schedule_enabled, schedule_cron_expression,
-			schedule_active, schedule_cluster_id, schedule_namespace
+			schedule_active, schedule_cluster_id, schedule_namespace, workspace_id
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			template_type = EXCLUDED.template_type,
@@ -763,15 +798,16 @@ func (db *DB) SaveTemplate(t *K6Template) error {
 			schedule_cron_expression = EXCLUDED.schedule_cron_expression,
 			schedule_active = EXCLUDED.schedule_active,
 			schedule_cluster_id = EXCLUDED.schedule_cluster_id,
-			schedule_namespace = EXCLUDED.schedule_namespace;`
+			schedule_namespace = EXCLUDED.schedule_namespace,
+			workspace_id = EXCLUDED.workspace_id;`
 	} else {
 		query = `
 		INSERT OR REPLACE INTO k6_templates (
 			id, name, template_type, parallelism, script_name, script_file, runner_image, cpu_limit, mem_limit,
 			script_content, created_at, sla_thresholds, schedule_enabled, schedule_cron_expression,
-			schedule_active, schedule_cluster_id, schedule_namespace
+			schedule_active, schedule_cluster_id, schedule_namespace, workspace_id
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	}
 
 	scheduleEnabled := 0
@@ -787,7 +823,7 @@ func (db *DB) SaveTemplate(t *K6Template) error {
 		query,
 		t.ID, t.Name, t.TemplateType, t.Parallelism, t.ScriptName, t.ScriptFile, t.RunnerImage,
 		t.CPULimit, t.MemLimit, t.ScriptContent, t.CreatedAt, t.SLAThresholds,
-		scheduleEnabled, t.ScheduleCronExpression, scheduleActive, t.ScheduleClusterID, t.ScheduleNamespace,
+		scheduleEnabled, t.ScheduleCronExpression, scheduleActive, t.ScheduleClusterID, t.ScheduleNamespace, t.WorkspaceID,
 	)
 	return err
 }
@@ -797,10 +833,35 @@ func (db *DB) GetTemplates() ([]*K6Template, error) {
 	query := db.rebind(`
 		SELECT id, name, template_type, parallelism, script_name, script_file, runner_image, cpu_limit, mem_limit,
 			script_content, created_at, sla_thresholds, schedule_enabled, schedule_cron_expression,
-			schedule_active, schedule_cluster_id, schedule_namespace
+			schedule_active, schedule_cluster_id, schedule_namespace, COALESCE(workspace_id,'')
 		FROM k6_templates ORDER BY created_at DESC;`)
 
 	rows, err := db.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	list := make([]*K6Template, 0)
+	for rows.Next() {
+		t, scanErr := scanK6Template(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		list = append(list, t)
+	}
+	return list, nil
+}
+
+func (db *DB) GetTemplatesByWorkspace(workspaceID string) ([]*K6Template, error) {
+	db.ensureTypedTemplateColumns()
+	query := db.rebind(`
+		SELECT id, name, template_type, parallelism, script_name, script_file, runner_image, cpu_limit, mem_limit,
+			script_content, created_at, sla_thresholds, schedule_enabled, schedule_cron_expression,
+			schedule_active, schedule_cluster_id, schedule_namespace, COALESCE(workspace_id,'')
+		FROM k6_templates WHERE workspace_id = ? ORDER BY created_at DESC;`)
+
+	rows, err := db.conn.Query(query, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -822,7 +883,7 @@ func (db *DB) GetTemplate(id string) (*K6Template, error) {
 	query := db.rebind(`
 		SELECT id, name, template_type, parallelism, script_name, script_file, runner_image, cpu_limit, mem_limit,
 			script_content, created_at, sla_thresholds, schedule_enabled, schedule_cron_expression,
-			schedule_active, schedule_cluster_id, schedule_namespace
+			schedule_active, schedule_cluster_id, schedule_namespace, COALESCE(workspace_id,'')
 		FROM k6_templates WHERE id = ? LIMIT 1;`)
 
 	rows, err := db.conn.Query(query, id)
@@ -833,7 +894,11 @@ func (db *DB) GetTemplate(id string) (*K6Template, error) {
 	if !rows.Next() {
 		return nil, nil
 	}
-	return scanK6Template(rows)
+	t, scanErr := scanK6Template(rows)
+	if scanErr != nil {
+		return nil, scanErr
+	}
+	return t, nil
 }
 
 func (db *DB) GetScheduledTemplates() ([]*K6Template, error) {
@@ -841,7 +906,7 @@ func (db *DB) GetScheduledTemplates() ([]*K6Template, error) {
 	query := db.rebind(`
 		SELECT id, name, template_type, parallelism, script_name, script_file, runner_image, cpu_limit, mem_limit,
 			script_content, created_at, sla_thresholds, schedule_enabled, schedule_cron_expression,
-			schedule_active, schedule_cluster_id, schedule_namespace
+			schedule_active, schedule_cluster_id, schedule_namespace, COALESCE(workspace_id,'')
 		FROM k6_templates
 		WHERE schedule_enabled = 1 AND template_type = ?
 		ORDER BY created_at DESC;`)
@@ -875,6 +940,7 @@ func scanK6Template(scanner interface {
 		&t.ID, &t.Name, &t.TemplateType, &t.Parallelism, &t.ScriptName, &t.ScriptFile, &runnerNull,
 		&t.CPULimit, &t.MemLimit, &t.ScriptContent, &t.CreatedAt, &slaNull,
 		&scheduleEnabledVal, &t.ScheduleCronExpression, &scheduleActiveVal, &t.ScheduleClusterID, &t.ScheduleNamespace,
+		&t.WorkspaceID,
 	); err != nil {
 		return nil, err
 	}
@@ -1044,6 +1110,9 @@ func (db *DB) SaveUser(u *User) error {
 }
 
 func (db *DB) DeleteUser(username string) error {
+	if err := db.DeleteWorkspaceUsersForUser(username); err != nil {
+		return err
+	}
 	query := db.rebind(`DELETE FROM users WHERE username = ?;`)
 	_, err := db.conn.Exec(query, username)
 	return err
@@ -1336,3 +1405,221 @@ func (db *DB) GetAlerts() ([]*TestAlert, error) {
 	}
 	return list, nil
 }
+
+func (db *DB) ensureWorkspaceIdColumn(tableName string) {
+	if db.driver == "postgres" {
+		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS workspace_id TEXT DEFAULT '';", tableName)
+		if _, err := db.conn.Exec(stmt); err != nil {
+			log.Printf("Warning: failed to migrate workspace_id column on %s: %v", tableName, err)
+		}
+		return
+	}
+
+	var hasWorkspaceId bool
+	rows, err := db.conn.Query(fmt.Sprintf("PRAGMA table_info(%s);", tableName))
+	if err == nil {
+		for rows.Next() {
+			var cid int
+			var name, ctype string
+			var notnull, pk int
+			var dfltVal sql.NullString
+			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltVal, &pk); err == nil && name == "workspace_id" {
+				hasWorkspaceId = true
+			}
+		}
+		rows.Close()
+	}
+	if !hasWorkspaceId {
+		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN workspace_id TEXT DEFAULT '';", tableName)
+		if _, err := db.conn.Exec(stmt); err != nil {
+			log.Printf("Warning: failed to migrate workspace_id column on %s: %v", tableName, err)
+		}
+	}
+}
+
+func (db *DB) ensureWorkspaceTablesAndColumns() error {
+	workspacesTable := `
+	CREATE TABLE IF NOT EXISTS workspaces (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		created_at TIMESTAMP NOT NULL
+	);`
+	workspaceUsersTable := `
+	CREATE TABLE IF NOT EXISTS workspace_users (
+		workspace_id TEXT NOT NULL,
+		username TEXT NOT NULL,
+		role TEXT NOT NULL,
+		PRIMARY KEY (workspace_id, username)
+	);`
+
+	if _, err := db.conn.Exec(workspacesTable); err != nil {
+		return fmt.Errorf("failed to create workspaces table: %w", err)
+	}
+	if _, err := db.conn.Exec(workspaceUsersTable); err != nil {
+		return fmt.Errorf("failed to create workspace_users table: %w", err)
+	}
+
+	db.ensureWorkspaceIdColumn("clusters")
+	db.ensureWorkspaceIdColumn("k6_templates")
+
+	var count int
+	countQuery := db.rebind("SELECT COUNT(*) FROM workspaces")
+	if err := db.conn.QueryRow(countQuery).Scan(&count); err == nil && count == 0 {
+		insertWS := db.rebind("INSERT INTO workspaces (id, name, created_at) VALUES (?, ?, ?)")
+		_, _ = db.conn.Exec(insertWS, "default", "Default Workspace", time.Now())
+
+		updClusters := db.rebind("UPDATE clusters SET workspace_id = 'default' WHERE workspace_id IS NULL OR workspace_id = ''")
+		_, _ = db.conn.Exec(updClusters)
+
+		updTemplates := db.rebind("UPDATE k6_templates SET workspace_id = 'default' WHERE workspace_id IS NULL OR workspace_id = ''")
+		_, _ = db.conn.Exec(updTemplates)
+
+		insertMember := db.rebind("INSERT INTO workspace_users (workspace_id, username, role) VALUES (?, ?, ?)")
+		_, _ = db.conn.Exec(insertMember, "default", "admin", "administrator")
+	}
+
+	return nil
+}
+
+type Workspace struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type WorkspaceUser struct {
+	WorkspaceID string `json:"workspace_id"`
+	Username    string `json:"username"`
+	Role        string `json:"role"`
+	Source      string `json:"source,omitempty"`
+}
+
+func (db *DB) GetWorkspaces() ([]*Workspace, error) {
+	query := db.rebind("SELECT id, name, created_at FROM workspaces ORDER BY created_at DESC")
+	rows, err := db.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*Workspace
+	for rows.Next() {
+		var w Workspace
+		if err := rows.Scan(&w.ID, &w.Name, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, &w)
+	}
+	return list, nil
+}
+
+func (db *DB) GetWorkspacesForUser(username string) ([]*Workspace, error) {
+	query := db.rebind(`
+		SELECT w.id, w.name, w.created_at
+		FROM workspaces w
+		JOIN workspace_users wu ON w.id = wu.workspace_id
+		WHERE wu.username = ?
+		ORDER BY w.created_at DESC`)
+	rows, err := db.conn.Query(query, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*Workspace
+	for rows.Next() {
+		var w Workspace
+		if err := rows.Scan(&w.ID, &w.Name, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, &w)
+	}
+	return list, nil
+}
+
+func (db *DB) GetWorkspaceUserRole(workspaceID, username string) (string, error) {
+	query := db.rebind("SELECT role FROM workspace_users WHERE workspace_id = ? AND username = ? LIMIT 1")
+	var role string
+	err := db.conn.QueryRow(query, workspaceID, username).Scan(&role)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	return role, nil
+}
+
+func (db *DB) SaveWorkspace(w *Workspace) error {
+	var query string
+	if db.driver == "postgres" {
+		query = `
+		INSERT INTO workspaces (id, name, created_at) VALUES ($1, $2, $3)
+		ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name;`
+	} else {
+		query = "INSERT OR REPLACE INTO workspaces (id, name, created_at) VALUES (?, ?, ?);"
+	}
+	_, err := db.conn.Exec(query, w.ID, w.Name, w.CreatedAt)
+	return err
+}
+
+func (db *DB) SaveWorkspaceUser(wu *WorkspaceUser) error {
+	return db.SaveWorkspaceUserWithSource(wu, "manual")
+}
+
+func (db *DB) GetWorkspaceUsers(workspaceID string) ([]*WorkspaceUser, error) {
+	query := db.rebind("SELECT workspace_id, username, role, COALESCE(source, 'manual') FROM workspace_users WHERE workspace_id = ?")
+	rows, err := db.conn.Query(query, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*WorkspaceUser
+	for rows.Next() {
+		var wu WorkspaceUser
+		if err := rows.Scan(&wu.WorkspaceID, &wu.Username, &wu.Role, &wu.Source); err != nil {
+			return nil, err
+		}
+		list = append(list, &wu)
+	}
+	return list, nil
+}
+
+func (db *DB) DeleteWorkspace(id string) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	delMembers := db.rebind("DELETE FROM workspace_users WHERE workspace_id = ?")
+	if _, err := tx.Exec(delMembers, id); err != nil {
+		return err
+	}
+
+	delMappings := db.rebind("DELETE FROM workspace_group_mappings WHERE workspace_id = ?")
+	if _, err := tx.Exec(delMappings, id); err != nil {
+		return err
+	}
+
+	delClusters := db.rebind("DELETE FROM clusters WHERE workspace_id = ?")
+	if _, err := tx.Exec(delClusters, id); err != nil {
+		return err
+	}
+
+	delTemplates := db.rebind("DELETE FROM k6_templates WHERE workspace_id = ?")
+	if _, err := tx.Exec(delTemplates, id); err != nil {
+		return err
+	}
+
+	delWS := db.rebind("DELETE FROM workspaces WHERE id = ?")
+	if _, err := tx.Exec(delWS, id); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+
+

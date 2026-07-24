@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,37 @@ type DiscoveredCluster struct {
 type AWSAccountConfig struct {
 	AccountID string   `json:"account_id"`
 	Regions   []string `json:"regions"`
+}
+
+const (
+	DefaultDiscoveryRoleName   = "StratosEKSDiscoveryRole"
+	DefaultDiscoveryExternalID = "StratosEKSDiscoveryExternalID"
+	EnvAccountsDiscovery       = "AWS_ACCOUNTS_DISCOVERY"
+	EnvAccountsDiscoveryExtID  = "AWS_ACCOUNTS_DISCOVERY_EXTERNAL_ID"
+	EnvAccountsDiscoveryRole   = "AWS_ACCOUNTS_DISCOVERY_ROLE"
+)
+
+// DiscoveryRoleName returns the IAM role name assumed in target AWS accounts.
+// Override with AWS_ACCOUNTS_DISCOVERY_ROLE (default: StratosEKSDiscoveryRole).
+func DiscoveryRoleName() string {
+	if name := strings.TrimSpace(os.Getenv(EnvAccountsDiscoveryRole)); name != "" {
+		return name
+	}
+	return DefaultDiscoveryRoleName
+}
+
+// DiscoveryRoleARN builds the full IAM role ARN for a target AWS account.
+func DiscoveryRoleARN(accountID string) string {
+	accountID = strings.TrimSpace(accountID)
+	return fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, DiscoveryRoleName())
+}
+
+// DiscoveryExternalID returns the STS external ID used for cross-account assume-role.
+func DiscoveryExternalID() string {
+	if id := strings.TrimSpace(os.Getenv(EnvAccountsDiscoveryExtID)); id != "" {
+		return id
+	}
+	return DefaultDiscoveryExternalID
 }
 
 // ParseAWSAccountsEnv parses the custom env var string format:
@@ -85,7 +117,7 @@ func DiscoverEKSClusters(ctx context.Context, accounts []AWSAccountConfig, exter
 	var wg sync.WaitGroup
 
 	for _, acc := range accounts {
-		roleARN := fmt.Sprintf("arn:aws:iam::%s:role/StratosEKSDiscoveryRole", acc.AccountID)
+		roleARN := DiscoveryRoleARN(acc.AccountID)
 
 		// Discover clusters concurrently per account/region to maximize speed
 		for _, r := range acc.Regions {
@@ -206,7 +238,7 @@ func LookupClusterAWSAccount(ctx context.Context, clusterName, apiServerURL, ext
 	stsClient := sts.NewFromConfig(baseCfg)
 
 	for _, acc := range accounts {
-		roleARN := fmt.Sprintf("arn:aws:iam::%s:role/StratosEKSDiscoveryRole", acc.AccountID)
+		roleARN := DiscoveryRoleARN(acc.AccountID)
 		for _, region := range acc.Regions {
 			assumeInput := &sts.AssumeRoleInput{
 				RoleArn:         aws.String(roleARN),
@@ -273,4 +305,55 @@ func AccountIDFromARN(arn string) string {
 		}
 	}
 	return accountID
+}
+
+// UpgradeClusterAddon upgrades an EKS-managed addon using AssumeRole AWS EKS SDK
+func UpgradeClusterAddon(ctx context.Context, accountID, region, clusterName, addonName, recommendedVersion, externalID string) error {
+	baseCfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load default AWS configuration: %w", err)
+	}
+
+	stsClient := sts.NewFromConfig(baseCfg)
+	roleARN := DiscoveryRoleARN(accountID)
+
+	assumeInput := &sts.AssumeRoleInput{
+		RoleArn:         aws.String(roleARN),
+		RoleSessionName: aws.String("stratos-eks-addon-upgrade"),
+		DurationSeconds: aws.Int32(900),
+	}
+	if externalID != "" {
+		assumeInput.ExternalId = aws.String(externalID)
+	}
+
+	assumed, err := stsClient.AssumeRole(ctx, assumeInput)
+	if err != nil {
+		return fmt.Errorf("failed to assume role %s: %w", roleARN, err)
+	}
+
+	assumedCfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(region),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			*assumed.Credentials.AccessKeyId,
+			*assumed.Credentials.SecretAccessKey,
+			aws.ToString(assumed.Credentials.SessionToken),
+		)),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to load EKS AWS config: %w", err)
+	}
+
+	eksClient := eks.NewFromConfig(assumedCfg)
+
+	_, err = eksClient.UpdateAddon(ctx, &eks.UpdateAddonInput{
+		AddonName:        aws.String(addonName),
+		ClusterName:      aws.String(clusterName),
+		AddonVersion:     aws.String(recommendedVersion),
+		ResolveConflicts: "OVERWRITE",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update EKS addon: %w", err)
+	}
+
+	return nil
 }
