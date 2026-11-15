@@ -11,7 +11,14 @@ import {
   Play,
   Server,
   SlidersHorizontal,
+  SquareCheckBig,
 } from "lucide-react";
+import CombinedTestForm from "@/components/CombinedTestForm";
+import { defaultCombinedTest, generateCombinedScript, combinedTestError, hasChaos } from "@/utils/combinedTest";
+import styles from "./K6TestWizard.module.css";
+import GuidedHTTPForm from "@/components/GuidedHTTPForm";
+import { defaultGuidedTest, generateGuidedScript, validateGuidedTest, withThresholds } from "@/utils/guidedTest";
+import { guidedDraftKey, parseGuidedDraft, serializeGuidedDraft } from "@/utils/guidedDraft";
 import Modal from "@/components/ui/Modal";
 import PreflightPanel from "@/components/guardian/PreflightPanel";
 import K6ScriptEditor from "@/components/K6ScriptEditor";
@@ -30,11 +37,106 @@ interface K6TestWizardProps {
   advancedMode: boolean;
   initialAction?: "now" | "schedule";
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (result?: { name: string; clusterId: string; namespace: string; scheduled: boolean }) => void;
 }
 
 type SchedulePreset = "daily" | "weekly" | "monthly" | "custom";
 type LaunchKind = "testrun" | "job";
+type TestActionId =
+  | "http"
+  | "auth"
+  | "graphql"
+  | "websocket"
+  | "s3"
+  | "sqs";
+
+type ActionDefinition = {
+  key: string;
+  secret?: boolean;
+};
+
+type TestAction = {
+  id: TestActionId;
+  title: string;
+  description: string;
+  env: string[];
+  definitions: ActionDefinition[];
+  snippet: string;
+};
+
+const TEST_ACTIONS: Array<Omit<TestAction, "title" | "description">> = [
+  {
+    id: "http",
+    env: ["TARGET_URL"],
+    definitions: [{ key: "TARGET_URL" }],
+    snippet: `// Action: API HTTP / REST
+  const response = http.get(__ENV.TARGET_URL);
+  check(response, { 'HTTP status is 2xx': (r) => r.status >= 200 && r.status < 300 });`,
+  },
+  {
+    id: "auth",
+    env: ["AUTH_URL", "API_URL", "USERNAME", "PASSWORD"],
+    definitions: [
+      { key: "AUTH_URL" }, { key: "API_URL" }, { key: "USERNAME" }, { key: "PASSWORD", secret: true },
+    ],
+    snippet: `// Action: authentification
+  const login = http.post(__ENV.AUTH_URL, JSON.stringify({ username: __ENV.USERNAME, password: __ENV.PASSWORD }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  check(login, { 'login succeeded': (r) => r.status === 200 });
+  const token = login.json('access_token');
+  const response = http.get(__ENV.API_URL, { headers: { Authorization: \`Bearer \${token}\` } });
+  check(response, { 'authenticated request succeeded': (r) => r.status === 200 });`,
+  },
+  {
+    id: "graphql",
+    env: ["GRAPHQL_URL"],
+    definitions: [{ key: "GRAPHQL_URL" }],
+    snippet: `// Action: GraphQL
+  const response = http.post(__ENV.GRAPHQL_URL, JSON.stringify({ query: '{ __typename }' }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  check(response, { 'GraphQL response has no errors': (r) => r.status === 200 && !r.json('errors') });`,
+  },
+  {
+    id: "websocket",
+    env: ["WS_URL"],
+    definitions: [{ key: "WS_URL" }],
+    snippet: `// Action: WebSocket (add: import ws from 'k6/ws'; at the top of this script)
+  // const response = ws.connect(__ENV.WS_URL, {}, (socket) => socket.close());
+  // check(response, { 'WebSocket connected': (r) => r && r.status === 101 });`,
+  },
+  {
+    id: "s3",
+    env: ["S3_PRESIGNED_URL"],
+    definitions: [{ key: "S3_PRESIGNED_URL" }],
+    snippet: `// Action: Amazon S3 via URL présignée
+  const response = http.get(__ENV.S3_PRESIGNED_URL);
+  check(response, { 'S3 object downloaded': (r) => r.status === 200 });`,
+  },
+  {
+    id: "sqs",
+    env: ["SQS_PROXY_URL"],
+    definitions: [{ key: "SQS_PROXY_URL" }],
+    snippet: `// Action: Amazon SQS via un endpoint applicatif/proxy
+  const response = http.post(__ENV.SQS_PROXY_URL, JSON.stringify({ message: 'k6 test message' }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  check(response, { 'SQS message accepted': (r) => r.status >= 200 && r.status < 300 });`,
+  },
+];
+
+function getTestActions(copy: ReturnType<typeof getK6WorkspaceCopy>): TestAction[] {
+  const content: Record<TestActionId, Pick<TestAction, "title" | "description">> = {
+    http: { title: copy.actionHttpTitle, description: copy.actionHttpDescription },
+    auth: { title: copy.actionAuthTitle, description: copy.actionAuthDescription },
+    graphql: { title: copy.actionGraphqlTitle, description: copy.actionGraphqlDescription },
+    websocket: { title: copy.actionWebsocketTitle, description: copy.actionWebsocketDescription },
+    s3: { title: copy.actionS3Title, description: copy.actionS3Description },
+    sqs: { title: copy.actionSqsTitle, description: copy.actionSqsDescription },
+  };
+  return TEST_ACTIONS.map((action) => ({ ...action, ...content[action.id] }));
+}
 
 export function extractEnvVarsFromScript(script: string): string[] {
   const envVars = new Set<string>();
@@ -88,9 +190,16 @@ export default function K6TestWizard({
   onClose,
   onCreated,
 }: K6TestWizardProps) {
-  const { lang } = usePreferences();
+  const { lang, t } = usePreferences();
   const copy = getK6WorkspaceCopy(lang);
+  const testActions = useMemo(() => getTestActions(copy), [copy]);
   const [step, setStep] = useState(0);
+  const [combinedMode, setCombinedMode] = useState(false);
+  const [combined, setCombined] = useState({ ...defaultCombinedTest });
+  const [guidedMode, setGuidedMode] = useState(false);
+  const [guided, setGuided] = useState({ ...defaultGuidedTest });
+  const [runSuffix, setRunSuffix] = useState("");
+  const [draftNotice, setDraftNotice] = useState("");
   const [clusters, setClusters] = useState<ClusterConfig[]>([]);
   const [templates, setTemplates] = useState<K6Template[]>([]);
   const [namespaces, setNamespaces] = useState<string[]>([]);
@@ -126,6 +235,7 @@ export default function K6TestWizard({
   const [datasetFiles, setDatasetFiles] = useState<string[]>([]);
   const [availableFiles, setAvailableFiles] = useState<string[]>([]);
   const [thresholds, setThresholds] = useState<{ metric: string; comparator: string; value: number }[]>([]);
+  const [selectedActions, setSelectedActions] = useState<TestActionId[]>([]);
   const wizardSessionRef = useRef(0);
   const allowAutoTemplateRef = useRef(true);
 
@@ -191,6 +301,10 @@ export default function K6TestWizard({
 
     const timer = window.setTimeout(() => {
       setStep(0);
+      setGuidedMode(false); setCombinedMode(false); setCombined({ ...defaultCombinedTest });
+      setGuided({ ...defaultGuidedTest });
+      setDraftNotice("");
+      setRunSuffix(crypto.randomUUID().slice(0, 8));
       setError("");
       setAction(initialAction);
       setTemplateId("");
@@ -203,6 +317,7 @@ export default function K6TestWizard({
       setOutput("");
       setEnvVars([]);
       setThresholds([]);
+      setSelectedActions([]);
       setDatasetFiles([]);
       setClusterId("");
       setNamespace("");
@@ -298,6 +413,7 @@ export default function K6TestWizard({
     setTemplateId(template.id);
     setName(sanitizeK8sName(template.name));
     const scriptContent = template.script_content || FALLBACK_SCRIPT;
+    setGuidedMode(false); setCombinedMode(false); setSelectedActions([]);
     setScript(scriptContent);
     setParallelism(template.parallelism || 1);
     setCpu(template.cpu_limit || "500m");
@@ -314,6 +430,50 @@ export default function K6TestWizard({
     });
     setEnvVars(merged);
   }
+
+  const toggleTestAction = (testAction: TestAction) => {
+    const selected = selectedActions.includes(testAction.id);
+    if (selected) {
+      setSelectedActions((current) => current.filter((id) => id !== testAction.id));
+      setScript((current) =>
+        current.replace(
+          new RegExp(
+            `\\n?\\s*// BEGIN k6 action: ${testAction.id}[\\s\\S]*?\\s*// END k6 action: ${testAction.id}\\n?`,
+          ),
+          "\n",
+        ),
+      );
+      return;
+    }
+
+    setSelectedActions((current) => [...current, testAction.id]);
+    setEnvVars((current) => {
+      const next = [...current];
+      testAction.env.forEach((key) => {
+        if (!next.some((item) => item.key === key)) next.push({ key, value: "" });
+      });
+      return next;
+    });
+    setScript((current) => {
+      if (current.includes(`// BEGIN k6 action: ${testAction.id}`)) return current;
+      const trimmed = current.trimEnd();
+      const lastBrace = trimmed.lastIndexOf("}");
+      const insertion = `\n\n  // BEGIN k6 action: ${testAction.id}\n  {\n    ${testAction.snippet.replace(/\n/g, "\n    ")}\n  }\n  // END k6 action: ${testAction.id}\n`;
+      return lastBrace >= 0
+        ? `${trimmed.slice(0, lastBrace)}${insertion}}${trimmed.slice(lastBrace + 1)}`
+        : `${trimmed}${insertion}`;
+    });
+  };
+
+  const setEnvVarValue = (key: string, value: string) => {
+    setEnvVars((current) => {
+      const existingIndex = current.findIndex((item) => item.key === key);
+      if (existingIndex === -1) return [...current, { key, value }];
+      const next = [...current];
+      next[existingIndex] = { ...next[existingIndex], value };
+      return next;
+    });
+  };
 
   const handleStepClick = (targetStep: number) => {
     if (targetStep === step) return;
@@ -334,7 +494,10 @@ export default function K6TestWizard({
         setError(copy.required);
         return;
       }
-      if (tempStep === 2 && !script.trim()) {
+      if (tempStep === 2 && guidedMode && !validateGuidedTest(guided)) { setError(t("guidedInvalid")); return; }
+      if (tempStep === 2 && combinedError) { setError(t(combinedError)); return; }
+      if (tempStep === 2 && prepared.error) { setError(prepared.error); return; }
+      if (tempStep === 2 && !guidedMode && !script.trim()) {
         setError(copy.required);
         return;
       }
@@ -351,7 +514,9 @@ export default function K6TestWizard({
     if (step === 0 && !templateId) return copy.required;
     if (step === 1 && (!clusterId || !namespace || !name.trim()))
       return copy.required;
-    if (step === 2 && !script.trim()) return copy.required;
+    if (step === 2 && combinedError) return t(combinedError);
+    if (step === 2 && guidedMode && !validateGuidedTest(guided)) return t("guidedInvalid");
+    if (step === 2 && !guidedMode && !script.trim()) return copy.required;
     if (step === 3 && parallelism < 1) return copy.required;
     if (step === 4 && action === "schedule" && !isValidCron(cron))
       return copy.invalidCron;
@@ -359,7 +524,7 @@ export default function K6TestWizard({
   };
 
   const next = () => {
-    const validation = validateStep();
+    const validation = validateStep() || (step === 2 ? prepared.error : "");
     if (validation) {
       setError(validation);
       return;
@@ -368,41 +533,40 @@ export default function K6TestWizard({
     setStep((current) => Math.min(5, current + 1));
   };
 
-  const injectThresholdsToScript = (scriptText: string, thresholdsList: { metric: string; comparator: string; value: number }[]) => {
-    if (thresholdsList.length === 0) return scriptText;
-
-    const thresholdsObj: Record<string, string[]> = {};
-    thresholdsList.forEach(t => {
-      const expression = `${t.comparator}${t.value}`;
-      if (!thresholdsObj[t.metric]) {
-        thresholdsObj[t.metric] = [];
-      }
-      thresholdsObj[t.metric].push(expression);
-    });
-
-    const thresholdsJson = JSON.stringify(thresholdsObj, null, 2);
-
-    if (scriptText.includes('export const options =')) {
-      const optionsRegex = /export\s+const\s+options\s*=\s*\{([\s\S]*?)\};/;
-      const match = scriptText.match(optionsRegex);
-      if (match) {
-        const optionsBody = match[1];
-        if (optionsBody.includes('thresholds:')) {
-          return scriptText + `\n\n// Injected thresholds\nexport const options = { ...options, thresholds: ${thresholdsJson} };\n`;
-        } else {
-          const newOptionsBody = `  thresholds: ${thresholdsJson.replace(/\n/g, '\n  ')},\n` + optionsBody;
-          return scriptText.replace(optionsRegex, `export const options = {\n${newOptionsBody}\n};`);
-        }
-      }
-    }
-
-    return scriptText + `\n\nexport const options = {\n  thresholds: ${thresholdsJson.replace(/\n/g, '\n  ')}\n};\n`;
+  const composedChaos = combinedMode && hasChaos(combined);
+  const combinedError = combinedMode ? (combinedTestError(combined) || (composedChaos && parallelism !== 1 ? "combinedSingleRunner" : "")) : "";
+  const resourceName = (guidedMode || combinedMode) ? `${sanitizeK8sName(name).slice(0, 40)}-${runSuffix}` : sanitizeK8sName(name);
+  const prepared = useMemo(() => {
+    try {
+      const source = combinedMode ? generateCombinedScript(combined, { cluster: clusterId, namespace, run: resourceName }) : guidedMode ? generateGuidedScript(guided, { cluster: clusterId, namespace, run: resourceName }) : script;
+      return { script: withThresholds(source, thresholds), error: "" };
+    } catch { return { script, error: t("guidedScriptInvalid") }; }
+  }, [combinedMode, combined, guidedMode, guided, clusterId, namespace, resourceName, script, thresholds, t]);
+  const draftKey = () => guidedDraftKey(localStorage.getItem("username") || "", localStorage.getItem("active_workspace_id") || "default");
+  const saveDraft = () => {
+    try {
+      localStorage.setItem(draftKey(), serializeGuidedDraft({ version: 1, guided, clusterId, namespace, name, parallelism, cpu, memory }));
+      setDraftNotice(t("guidedSaved"));
+    } catch { setDraftNotice(t("guidedDraftError")); }
+  };
+  const restoreDraft = () => {
+    try {
+      const raw = localStorage.getItem(draftKey());
+      if (!raw) { setDraftNotice(t("guidedNoDraft")); return; }
+      const draft = parseGuidedDraft(raw);
+      allowAutoTemplateRef.current = false;
+      setGuidedMode(true); setCombinedMode(false); setTemplateId("guided-http"); setGuided(draft.guided);
+      setName(draft.name); setParallelism(draft.parallelism); setCpu(draft.cpu); setMemory(draft.memory);
+      setClusterId(clusters.some(c => c.id === draft.clusterId) ? draft.clusterId : "");
+      setNamespace(draft.namespace); setThresholds([]); setDatasetFiles([]); setEnvVars([]); setSelectedActions([]);
+      setDraftNotice(""); setStep(1);
+    } catch { setDraftNotice(t("guidedDraftError")); }
   };
 
   const buildPayload = (validationRunId?: string, resolvedRunnerImage?: string) => {
     const resourceKind = action === "schedule" ? "cronjob" : launchKind;
     const scriptName =
-      selectedTemplate?.script_name || `${sanitizeK8sName(name)}-script`;
+      ((guidedMode || combinedMode) ? `cm-${resourceName}` : selectedTemplate?.script_name) || `${sanitizeK8sName(name)}-script`;
     const rawRunnerImage =
       image.trim() ||
       (defaults.use_image ? defaults.image_url : "") ||
@@ -413,9 +577,14 @@ export default function K6TestWizard({
       (rawRunnerImage
         ? resolveClusterImage(rawRunnerImage, clusterImageContext(selectedCluster))
         : defaultRunnerImage(selectedCluster));
-    const finalScript = injectThresholdsToScript(script, thresholds);
+    const finalScript = prepared.script;
+    const runnerEnv: Array<Record<string, unknown>> = envVars.filter(item => item.key.trim() && (!(guidedMode || combinedMode) || !["STRATOS_BEARER_TOKEN", "STRATOS_RUN_ID"].includes(item.key))).map(item => ({ name: item.key, value: item.value }));
+    if (guidedMode || combinedMode) {
+      runnerEnv.push(resourceKind === "testrun" ? { name: "STRATOS_RUN_ID", value: resourceName } : { name: "STRATOS_RUN_ID", valueFrom: { fieldRef: { fieldPath: "metadata.labels['job-name']" } } });
+      if (guidedMode && guided.auth === "bearer") runnerEnv.push({ name: "STRATOS_BEARER_TOKEN", valueFrom: { secretKeyRef: { name: guided.secretName, key: guided.secretKey } } });
+    }
     const payload: Record<string, unknown> = {
-      name: sanitizeK8sName(name),
+      name: resourceName,
       scriptContent: finalScript,
       resource_kind: resourceKind,
       active: action === "schedule" ? true : undefined,
@@ -431,13 +600,7 @@ export default function K6TestWizard({
         runner: {
           resources: { limits: { cpu, memory } },
           ...(runnerImage ? { image: runnerImage } : {}),
-          ...(envVars.filter((item) => item.key.trim()).length
-            ? {
-                env: envVars
-                  .filter((item) => item.key.trim())
-                  .map((item) => ({ name: item.key, value: item.value })),
-              }
-            : {}),
+          ...(runnerEnv.length ? { env: runnerEnv } : {}),
         },
         ...(output.trim() ? { arguments: output.trim() } : {}),
       },
@@ -448,7 +611,7 @@ export default function K6TestWizard({
   };
 
   const submit = () => {
-    const validation = validateStep();
+    const validation = (combinedError ? t(combinedError) : "") || (guidedMode && !validateGuidedTest(guided) ? t("guidedInvalid") : prepared.error) || validateStep();
     if (validation) {
       setError(validation);
       return;
@@ -478,13 +641,14 @@ export default function K6TestWizard({
           // Fall back to client-side resolution above.
         }
       }
-      await api.createCRD(
+      const created = await api.createCRD(
         clusterId,
         namespace,
         buildPayload(validationRunId, resolvedRunnerImage),
       );
       setPreflightOpen(false);
-      onCreated();
+      if (guidedMode) saveDraft();
+      onCreated({ name: created.metadata?.name || resourceName, clusterId, namespace, scheduled: action === "schedule" });
       onClose();
     } catch (reason) {
       setPreflightOpen(false);
@@ -495,12 +659,13 @@ export default function K6TestWizard({
   };
 
   const reviewRows = [
-    [copy.name, sanitizeK8sName(name)],
-    [copy.chooseTemplate, selectedTemplate?.name || "—"],
+    [copy.name, resourceName],
+    [copy.chooseTemplate, combinedMode ? t("combinedTitle") : guidedMode ? t("guidedTitle") : selectedTemplate?.name || "—"],
     [
       copy.target,
       `${clusters.find((cluster) => cluster.id === clusterId)?.name || clusterId} / ${namespace}`,
     ],
+    ...(combinedMode ? [[copy.actionsTitle, combined.actions.join(" + ")]] : []),
     [copy.parallelism, String(parallelism)],
     [copy.type, launchKind === "job" ? "Job" : "TestRun"],
     [
@@ -527,10 +692,11 @@ export default function K6TestWizard({
         title={copy.newTest}
         subtitle={`${step + 1} / ${steps.length} · ${steps[step].label}`}
         maxWidthClassName="max-w-5xl"
+        className={styles.wizard}
         contained
       >
         <div
-          className="flex h-full min-h-0 flex-col gap-6"
+          className="flex h-full min-h-0 flex-col gap-4"
           dir={lang === "he" ? "rtl" : "ltr"}
         >
           <ol
@@ -574,16 +740,30 @@ export default function K6TestWizard({
               {error}
             </div>
           )}
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <button type="button" onClick={restoreDraft} disabled={loading} className="text-purple-300 disabled:opacity-50">{t("guidedRestore")}</button>
+            {guidedMode && <button type="button" onClick={saveDraft} className="text-purple-300">{t("guidedSave")}</button>}
+            {draftNotice && <span role="status">{draftNotice}</span>}
+          </div>
+          {guidedMode && <p className="text-[11px] text-slate-400">{t("guidedDraftHint")}</p>}
           {loading && step === 0 ? (
             <div className="min-h-0 flex-1 overflow-y-auto py-16 text-center text-sm text-slate-400">
               {copy.loading}
             </div>
           ) : (
             <div
-              className={`min-h-0 flex-1 pr-2 ${step === 1 || step === 2 ? "overflow-visible" : "overflow-y-auto"}`}
+              className={`min-h-0 flex-1 pr-2 ${step === 1 ? "overflow-visible" : "overflow-y-auto"}`}
             >
               {step === 0 && (
                 <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  <button type="button" aria-pressed={combinedMode} className={styles.entry} onClick={() => {
+                    allowAutoTemplateRef.current = false; setCombinedMode(true); setGuidedMode(false); setTemplateId("combined"); setName("combined-test"); setParallelism(1); setLaunchKind("job"); setImage(""); setThresholds([]); setSelectedActions([]); setDatasetFiles([]); setEnvVars([]); setStep(1);
+                  }}><Layers3 size={24} /><strong>{t("combinedTitle")}</strong><span>{t("combinedHint")}</span><span className="mt-3 font-mono">HTTP · pod_kill · network_latency</span></button>
+                  <button type="button" aria-pressed={guidedMode} onClick={() => {
+                    allowAutoTemplateRef.current = false; setGuidedMode(true); setCombinedMode(false); setTemplateId("guided-http"); setName("http-test"); setParallelism(1); setThresholds([]); setSelectedActions([]); setDatasetFiles([]); setEnvVars([]); setStep(1);
+                  }} className={styles.entry}>
+                    <strong className="block text-sm">{t("guidedStart")}</strong><span className="mt-2 block text-xs text-slate-400">{t("guidedHint")}</span>
+                  </button>
                   {templates.map((template) => (
                     <button
                       key={template.id}
@@ -669,6 +849,76 @@ export default function K6TestWizard({
 
               {step === 2 && (
                 <div className="space-y-4 min-h-0">
+                  {guidedMode && <GuidedHTTPForm value={guided} onChange={setGuided} />}
+                  {combinedMode && <CombinedTestForm value={combined} namespace={namespace} onChange={value => { setCombined(value); if (hasChaos(value)) setParallelism(1); }} />}
+                  {!guidedMode && !combinedMode && <>
+                  <section className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950/30" aria-labelledby="k6-test-actions-title">
+                    <div className="mb-4 flex items-start gap-2.5">
+                      <span className="mt-0.5 rounded-lg bg-purple-100 p-1.5 text-purple-700 dark:bg-purple-500/10 dark:text-purple-300">
+                        <SquareCheckBig className="h-4 w-4" aria-hidden="true" />
+                      </span>
+                      <div>
+                        <h3 id="k6-test-actions-title" className="text-sm font-semibold text-slate-800 dark:text-slate-100">{copy.actionsTitle}</h3>
+                        <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">{copy.actionsDescription}</p>
+                      </div>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {testActions.map((testAction) => {
+                        const checked = selectedActions.includes(testAction.id);
+                        return (
+                          <label key={testAction.id} className={`group flex cursor-pointer gap-2.5 rounded-xl border p-3 transition ${checked ? "border-purple-500 bg-purple-50 shadow-sm dark:border-purple-500/60 dark:bg-purple-500/10" : "border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 dark:border-slate-800 dark:bg-slate-950/30 dark:hover:border-slate-700 dark:hover:bg-slate-900/60"}`}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleTestAction(testAction)}
+                              className="mt-0.5 h-4 w-4 shrink-0 accent-purple-600"
+                            />
+                            <span>
+                              <span className="block text-xs font-semibold text-slate-800 dark:text-slate-100">{testAction.title}</span>
+                              <span className="mt-1 block text-[11px] leading-4 text-slate-600 dark:text-slate-400">{testAction.description}</span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {selectedActions.length > 0 && (
+                      <div className="mt-4 rounded-xl border border-purple-200 bg-purple-50/70 p-3.5 dark:border-purple-500/20 dark:bg-purple-500/5" aria-labelledby="k6-action-definitions-title">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <div>
+                            <h3 id="k6-action-definitions-title" className="text-xs font-semibold text-purple-900 dark:text-purple-200">{copy.actionsConfigTitle}</h3>
+                            <p className="mt-0.5 text-[11px] text-slate-600 dark:text-slate-400">{copy.actionsConfigDescription}</p>
+                          </div>
+                          <span className="shrink-0 rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-purple-700 shadow-sm dark:bg-purple-500/10 dark:text-purple-300">{selectedActions.length} {copy.actionsSelected}</span>
+                        </div>
+                        <div className="space-y-3">
+                          {testActions.filter((testAction) => selectedActions.includes(testAction.id)).map((testAction) => (
+                            <fieldset key={testAction.id} className="rounded-lg border border-purple-200/80 bg-white/80 px-3 pb-3 pt-2 dark:border-purple-500/15 dark:bg-slate-950/20">
+                              <legend className="px-1 text-xs font-semibold text-slate-800 dark:text-slate-200">{testAction.title}</legend>
+                              <div className="flex flex-wrap gap-3">
+                                {testAction.definitions.map((definition) => {
+                                  const inputId = `k6-action-${testAction.id}-${definition.key.toLowerCase()}`;
+                                  const value = envVars.find((item) => item.key === definition.key)?.value || "";
+                                  return (
+                                    <label key={definition.key} htmlFor={inputId} className="min-w-48 flex-1 space-y-1.5 text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                                      <span>{definition.key}</span>
+                                      <input
+                                        id={inputId}
+                                        type={definition.secret ? "password" : "text"}
+                                        value={value}
+                                        placeholder={copy.actionValuePlaceholder}
+                                        onChange={(event) => setEnvVarValue(definition.key, event.target.value)}
+                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-600"
+                                      />
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            </fieldset>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </section>
                   <K6ScriptEditor
                     script={script}
                     onChange={setScript}
@@ -678,6 +928,9 @@ export default function K6TestWizard({
                     height="360px"
                   />
 
+                  </>}
+                  {(guidedMode || combinedMode) && <pre className="max-h-80 overflow-auto rounded-xl bg-slate-950 p-4 text-xs" aria-label={copy.script}>{prepared.script}</pre>}
+                  {prepared.error && <p role="alert" className="text-red-300">{prepared.error}</p>}
                   {/* Environment Variables */}
                   <div className="space-y-3 pt-4 border-t border-slate-800/80">
                     <div className="flex items-center justify-between">
@@ -735,6 +988,7 @@ export default function K6TestWizard({
                       </div>
                     )}
                   </div>
+
                 </div>
               )}
 
@@ -745,6 +999,7 @@ export default function K6TestWizard({
                       {copy.advancedHelp}
                     </p>
                   )}
+                  {composedChaos && <p className={styles.notice}>{t("combinedSingleRunner")}</p>}
                   <div className="grid md:grid-cols-2 gap-4">
                     <label className="space-y-2 text-xs text-slate-400">
                       <span>{copy.parallelism}</span>
@@ -752,6 +1007,7 @@ export default function K6TestWizard({
                         type="number"
                         min={1}
                         value={parallelism}
+                        disabled={composedChaos}
                         onChange={(event) =>
                           setParallelism(Math.max(1, Number(event.target.value)))
                         }
@@ -1104,7 +1360,7 @@ export default function K6TestWizard({
                       {copy.script}
                     </p>
                     <pre className="max-h-72 overflow-auto whitespace-pre-wrap text-[10px] leading-4 text-slate-500">
-                      {script}
+                      {prepared.script}
                     </pre>
                   </div>
                 </div>
@@ -1155,7 +1411,7 @@ export default function K6TestWizard({
         open={preflightOpen}
         onClose={() => setPreflightOpen(false)}
         subjectType={action === "schedule" ? "schedule_create" : "test_launch"}
-        subjectRef={sanitizeK8sName(name)}
+        subjectRef={resourceName}
         clusterId={clusterId}
         namespace={namespace}
         environment="kubernetes"

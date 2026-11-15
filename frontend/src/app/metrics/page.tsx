@@ -100,6 +100,12 @@ export default function MetricsPage() {
       setError('');
       const data = await api.getTestRuns();
       const safeData = data || [];
+      const requested = new URLSearchParams(window.location.search);
+      const linkedCluster = requested.get('cluster');
+      const linkedNamespace = requested.get('namespace');
+      const linkedRun = requested.get('run');
+      if (linkedCluster) setSelectedCluster(linkedCluster);
+      if (linkedNamespace) setSelectedNamespace(linkedNamespace);
       setRuns(safeData);
       
       if (safeData.length > 0) {
@@ -108,7 +114,8 @@ export default function MetricsPage() {
         if (stillExists && stillExists.length > 0) {
           setSelectedRunKeys(stillExists);
         } else {
-          setSelectedRunKeys([getRunKey(safeData[0])]);
+          const linked = safeData.find(r => (!linkedCluster || r.cluster === linkedCluster) && (!linkedNamespace || r.namespace === linkedNamespace) && (!linkedRun || r.test_run_id === linkedRun));
+          setSelectedRunKeys(linked ? [getRunKey(linked)] : []);
         }
       } else {
         setSelectedRunKeys([]);
@@ -152,7 +159,10 @@ export default function MetricsPage() {
     if (filteredRuns.length > 0) {
       const validSelectedKeys = selectedRunKeys.filter(key => filteredRuns.some(r => getRunKey(r) === key));
       if (validSelectedKeys.length === 0) {
-        setSelectedRunKeys([getRunKey(filteredRuns[0])]);
+        const requested = new URLSearchParams(window.location.search);
+        const linkedRun = requested.get("run");
+        const linked = linkedRun ? filteredRuns.find(run => run.test_run_id === linkedRun) : filteredRuns[0];
+        setSelectedRunKeys(linked ? [getRunKey(linked)] : []);
       } else if (validSelectedKeys.length !== selectedRunKeys.length) {
         setSelectedRunKeys(validSelectedKeys);
       }
@@ -962,12 +972,12 @@ export default function MetricsPage() {
                       <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
                       <XAxis 
                         dataKey="timestamp" 
-                        stroke="#64748B" 
+                        stroke="var(--ui-muted)"
                         fontSize={10}
                         tickLine={false}
                       />
                       <YAxis 
-                        stroke="#64748B" 
+                        stroke="var(--ui-muted)"
                         fontSize={10}
                         tickLine={false}
                         tickFormatter={(val: any) => {
@@ -977,16 +987,16 @@ export default function MetricsPage() {
                         }}
                       />
                       <ReChartsTooltip 
-                        contentStyle={{ backgroundColor: '#0F172A', border: '1px solid #1E293B', borderRadius: '12px' }}
-                        labelStyle={{ fontSize: '11px', color: '#94A3B8', fontWeight: 'bold' }}
-                        itemStyle={{ fontSize: '11px', color: '#E2E8F0' }}
+                        contentStyle={{ backgroundColor: 'var(--ui-tooltip-bg)', border: '1px solid var(--ui-control-border)', borderRadius: '12px' }}
+                        labelStyle={{ fontSize: '11px', color: 'var(--ui-muted)', fontWeight: 'bold' }}
+                        itemStyle={{ fontSize: '11px', color: 'var(--ui-text)' }}
                       />
                       <ReChartsLegend 
                         wrapperStyle={{ fontSize: '11px', paddingTop: '15px' }}
                       />
                       {Object.keys(multiPoints).map((runKey, idx) => {
                         const runId = runKey.split('|')[0];
-                        const colors = ['#A855F7', '#EC4899', '#3B82F6', '#10B981'];
+                        const colors = ['var(--ui-chart-1)', 'var(--ui-chart-2)', 'var(--ui-chart-3)', 'var(--ui-chart-4)'];
                         const color = colors[idx % colors.length];
                         return (
                           <Line

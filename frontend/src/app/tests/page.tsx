@@ -75,7 +75,7 @@ function dateLabel(value: string | Date | undefined, locale: string) {
 
 export default function TestsWorkspacePage() {
   const router = useRouter();
-  const { lang } = usePreferences();
+  const { lang, t } = usePreferences();
   const copy = getK6WorkspaceCopy(lang);
   const [tab, setTab] = useState<WorkspaceTab>("executions");
   const [advancedMode, setAdvancedMode] = useState(false);
@@ -97,6 +97,7 @@ export default function TestsWorkspacePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [resultsHref, setResultsHref] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardAction, setWizardAction] = useState<"now" | "schedule">("now");
   const [selectedExecution, setSelectedExecution] =
@@ -578,7 +579,7 @@ export default function TestsWorkspacePage() {
           <button
             type="button"
             onClick={toggleAdvanced}
-            className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium ${advancedMode ? "border-purple-500/40 bg-purple-500/10 text-purple-200" : "border-slate-800 text-slate-400"}`}
+            className="ui-mode-toggle inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold"
             aria-pressed={advancedMode}
           >
             <Braces className="h-4 w-4" />
@@ -623,6 +624,7 @@ export default function TestsWorkspacePage() {
       {notice && (
         <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-xs text-emerald-300">
           {notice}
+          {resultsHref && <Link href={resultsHref} className="ms-3 underline">{t("guidedResults")}</Link>}
         </div>
       )}
 
@@ -1156,7 +1158,12 @@ export default function TestsWorkspacePage() {
         advancedMode={advancedMode}
         initialAction={wizardAction}
         onClose={() => setWizardOpen(false)}
-        onCreated={() => {
+        onCreated={(created) => {
+          if (created) {
+            const params = new URLSearchParams({ cluster: created.clusterId, namespace: created.namespace });
+            if (!created.scheduled) params.set("run", created.name);
+            setResultsHref(`/metrics?${params}`);
+          }
           setNotice(copy.createdSuccess);
           loadAll();
         }}

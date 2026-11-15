@@ -11,6 +11,7 @@ interface ModalProps {
   children: React.ReactNode;
   maxWidthClassName?: string;
   contained?: boolean;
+  className?: string;
 }
 
 /**
@@ -27,6 +28,7 @@ export default function Modal({
   children,
   maxWidthClassName = "max-w-md",
   contained = false,
+  className = "",
 }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -75,7 +77,7 @@ export default function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title || "Dialog"}
-        className={`bg-slate-900 border border-slate-800 rounded-3xl w-full ${maxWidthClassName} p-6 shadow-2xl relative ${contained ? "h-[min(90vh,850px)] flex flex-col" : "max-h-[85vh] overflow-y-auto"}`}
+        className={`bg-slate-900 border border-slate-800 rounded-3xl w-full ${maxWidthClassName} ${className} p-6 shadow-2xl relative ${contained ? "h-[min(90vh,850px)] flex flex-col" : "max-h-[85vh] overflow-y-auto"}`}
       >
         <button
           type="button"

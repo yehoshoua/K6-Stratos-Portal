@@ -824,13 +824,7 @@ export default function () {
       if (!scheduleEnabled && typeof message === 'string' && message.toLowerCase().includes('guardian')) {
         setGuardianBlock({
           subjectRef: newRun.name,
-          payload: {
-            scriptContent: specBody.scriptContent,
-            cpuLimit: newRun.cpuLimit,
-            memLimit: newRun.memLimit,
-            parallelism: Number(newRun.parallelism),
-            runnerImage: newRun.useCustomImage ? newRun.customImage : undefined,
-          },
+          payload: specBody,
           retry: async (validationRunId: string) => {
             await api.createCRD(selectedClusterId, targetNs, { ...specBody, validation_run_id: validationRunId });
             setIsModalOpen(false);

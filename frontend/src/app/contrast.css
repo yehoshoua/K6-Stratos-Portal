@@ -1,0 +1,68 @@
+/* Foreground roles are separate from decorative palette colors. A light
+   background must not inherit the pale text intended for a dark surface. */
+:root {
+  --ui-text: #f1f5f9;
+  --ui-muted: #b6c3d6;
+  --ui-primary-text: var(--ui-primary-text-dark, #c4b5fd);
+  --ui-accent-text: var(--ui-accent-text-dark, #f9a8d4);
+  --ui-success-text: #6ee7b7;
+  --ui-danger-text: #fda4af;
+  --ui-warning-text: #fcd34d;
+  --ui-info-text: #93c5fd;
+  --ui-control-border: #74849a;
+  --ui-tooltip-bg: #0f172a;
+  --ui-chart-1: #c4b5fd;
+  --ui-chart-2: #f9a8d4;
+  --ui-chart-3: #93c5fd;
+  --ui-chart-4: #6ee7b7;
+  --ui-selected-bg: #1e293b;
+  --ui-primary-fill: #5b21b6;
+  --ui-accent-fill: #9d174d;
+}
+html[data-theme="light"], html[data-theme="system"][data-color-scheme="light"] {
+  --ui-text: #0f172a;
+  --ui-muted: #475569;
+  --ui-primary-text: var(--ui-primary-text-light, #5b21b6);
+  --ui-accent-text: var(--ui-accent-text-light, #9d174d);
+  --ui-success-text: #065f46;
+  --ui-danger-text: #9f1239;
+  --ui-warning-text: #78350f;
+  --ui-info-text: #1e40af;
+  --ui-control-border: #64748b;
+  --ui-tooltip-bg: #ffffff;
+  --ui-chart-1: #6d28d9;
+  --ui-chart-2: #9d174d;
+  --ui-chart-3: #1e40af;
+  --ui-chart-4: #065f46;
+  --ui-selected-bg: #e2e8f0;
+}
+/* Existing utility classes use these roles throughout pages, tables, menus and
+   modals. :where keeps component-specific styles (including the wizard) first. */
+:where(.text-slate-500, .text-slate-600, .text-slate-650) { color: var(--ui-muted); }
+:where(.text-purple-100, .text-purple-200, .text-purple-300, .text-purple-400, .text-purple-500, .text-purple-600, .text-purple-700, .text-purple-900, .text-purple-400\/80, .text-purple-400\/90) { color: var(--ui-primary-text); }
+:where(.text-pink-300, .text-pink-400, .text-pink-500) { color: var(--ui-accent-text); }
+:where(.text-emerald-300, .text-emerald-400, .text-emerald-500, .text-emerald-400\/90) { color: var(--ui-success-text); }
+:where(.text-red-300, .text-red-400, .text-red-500, .text-rose-400) { color: var(--ui-danger-text); }
+:where(.text-amber-300, .text-amber-400, .text-amber-500\/80) { color: var(--ui-warning-text); }
+:where(.text-blue-300, .text-blue-400, .text-cyan-400) { color: var(--ui-info-text); }
+:where(.hover\:text-purple-300, .hover\:text-purple-400):hover { color: var(--ui-primary-text); }
+:where(.hover\:text-red-300, .hover\:text-red-400):hover { color: var(--ui-danger-text); }
+
+/* Only filled surfaces carry white text. Translucent badges and selected tabs
+   inherit their ordinary foreground, never a blanket white-text override. */
+:where(.bg-purple-500, .bg-purple-600) { background-color: var(--ui-primary-fill); color: #fff; --color-white: #fff; }
+:where(.bg-pink-500, .bg-pink-600) { background-color: var(--ui-accent-fill); color: #fff; --color-white: #fff; }
+:where(.from-purple-600, .from-purple-500) {
+  background-image: linear-gradient(to right, var(--ui-primary-fill), var(--ui-accent-fill));
+  color: #fff; --color-white: #fff;
+}
+:where(.bg-red-500, .bg-red-600, .from-red-500, .from-red-600) { background: #b91c1c; color: #fff; --color-white: #fff; }
+:where(.bg-emerald-500, .bg-emerald-600, .from-emerald-600) { background: #047857; color: #fff; --color-white: #fff; }
+:where(.bg-blue-500, .bg-blue-600) { background: #1d4ed8; color: #fff; --color-white: #fff; }
+
+:where(input, textarea)::placeholder { color: var(--ui-muted); opacity: 1; }
+:where(button, input, select, textarea)[class*="border-slate-"] { border-color: var(--ui-control-border); }
+:where(button, a, input, select, textarea, summary, [tabindex]):focus-visible { outline: 3px solid var(--ui-primary-text); outline-offset: 3px; }
+.ui-mode-toggle { color: var(--ui-muted); border-color: var(--ui-control-border); }
+.ui-mode-toggle[aria-pressed="true"] { color: var(--ui-primary-text); background: var(--ui-selected-bg); border-color: currentColor; }
+.ui-mode-toggle:hover { background: var(--ui-selected-bg); }

@@ -49,6 +49,8 @@ export interface InfluxServerConfig {
   version: string;
   url: string;
   token?: string;
+  has_token?: boolean;
+  has_password?: boolean;
   org?: string;
   bucket: string;
   username?: string;
@@ -150,6 +152,7 @@ export interface SSOConfig {
   issuer_url: string;
   client_id: string;
   client_secret?: string;
+  has_client_secret?: boolean;
   redirect_uri: string;
   admin_groups?: string;
   editor_groups?: string;
@@ -196,6 +199,8 @@ export interface BatchWorkload extends K6CRD {
 }
 
 export interface K8sPod {
+  namespace?: string;
+  labels?: Record<string, string>;
   name: string;
   status: string;
 }
@@ -306,20 +311,6 @@ export const api = {
     }
     const data = await res.json();
 	localStorage.removeItem('token'); // Remove sessions created by older versions.
-    localStorage.setItem('username', data.username);
-    localStorage.setItem('role', data.role);
-    return data;
-  },
-
-  async loginSSO(user: string, email: string) {
-    const res = await apiFetch(`${BASE_URL}/auth/sso`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user, email }),
-    });
-    if (!res.ok) throw new Error('SSO login failed');
-    const data = await res.json();
-	localStorage.removeItem('token');
     localStorage.setItem('username', data.username);
     localStorage.setItem('role', data.role);
     return data;
@@ -704,7 +695,8 @@ export const api = {
     start?: string,
     stop?: string,
     cluster?: string,
-    namespace?: string
+    namespace?: string,
+    readOnly = false
   ): Promise<TelemetryPoint[]> {
     let url = `${BASE_URL}/influx/runs/${runId}/metrics?metric=${metric}`;
     if (start && stop) {
@@ -712,6 +704,7 @@ export const api = {
     } else {
       url += `&range=${range}`;
     }
+    if (readOnly) url += '&read_only=true';
     if (cluster) {
       url += `&cluster=${encodeURIComponent(cluster)}`;
     }
@@ -945,11 +938,11 @@ export const api = {
     return res.json();
   },
 
-  async exchangeSSOCode(code: string): Promise<{ token: string; username: string; role: string }> {
+  async exchangeSSOCode(code: string, state: string): Promise<{ username: string; role: string }> {
     const res = await apiFetch(`${BASE_URL}/auth/sso/callback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ code, state }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'SSO token exchange failed' }));

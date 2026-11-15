@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { Lock, User, ShieldAlert, KeyRound, ArrowRight, Sun, Moon, Monitor, Globe, ChevronDown } from 'lucide-react';
 import { api } from '@/services/api';
@@ -20,8 +20,7 @@ export default function LoginPage() {
   const [ssoName, setSsoName] = useState('SSO');
   const [exchangeLoading, setExchangeLoading] = useState(false);
 
-  const [ssoUser, setSsoUser] = useState('sso-admin');
-  const [ssoEmail, setSsoEmail] = useState('sso-admin@company.com');
+  const exchangeStarted = useRef(false);
 
   useEffect(() => {
     api.getSSOStatus().then(res => {
@@ -37,10 +36,12 @@ export default function LoginPage() {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const code = params.get('code');
-      if (code) {
+      if (code && !exchangeStarted.current) {
+        exchangeStarted.current = true;
         setExchangeLoading(true);
         setError('');
-        api.exchangeSSOCode(code)
+        window.history.replaceState({}, '', '/login');
+        api.exchangeSSOCode(code, params.get('state') || '')
           .then(() => {
             router.push('/');
           })
@@ -83,21 +84,6 @@ export default function LoginPage() {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '';
       setError(message || t('oidcRedirectFailed'));
-      setLoading(false);
-    }
-  };
-
-  const handleSSOSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-
-    try {
-      await api.loginSSO(ssoUser, ssoEmail);
-      router.push('/');
-    } catch {
-      setError(t('ssoConnectionFailed'));
-    } finally {
       setLoading(false);
     }
   };
@@ -266,7 +252,6 @@ export default function LoginPage() {
 
         {activeTab === 'sso' && ssoEnabled && (
           <div className="space-y-4 animate-fadeIn">
-            {ssoEnabled ? (
               <div className="text-center py-4 space-y-4">
                 <p className="text-xs text-slate-400">{t('ssoConfiguredHint', { name: ssoName })}</p>
                 <button
@@ -278,40 +263,7 @@ export default function LoginPage() {
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
-            ) : (
-              <form onSubmit={handleSSOSubmit} className="space-y-4">
-                <div className="p-4 bg-slate-950 border border-slate-800/80 rounded-2xl space-y-3">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-500 mb-1">{t('ssoUserName')}</label>
-                    <input
-                      type="text"
-                      required
-                      value={ssoUser}
-                      onChange={(e) => setSsoUser(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 outline-none focus:border-purple-500/50"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-500 mb-1">{t('emailLabel')}</label>
-                    <input
-                      type="email"
-                      required
-                      value={ssoEmail}
-                      onChange={(e) => setSsoEmail(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 outline-none focus:border-purple-500/50"
-                    />
-                  </div>
-                </div>
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold py-3 px-4 rounded-2xl border border-slate-700 transition-all duration-300 shadow-md active:scale-98 text-sm cursor-pointer disabled:opacity-50"
-                >
-                  {t('ssoLogin')}
-                </button>
-              </form>
-            )}
           </div>
         )}
 

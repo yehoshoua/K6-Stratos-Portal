@@ -182,7 +182,9 @@ export default function SettingsPage() {
     bucket: '',
     username: '',
     password: '',
-    method: 'POST'
+    method: 'POST',
+    has_token: false,
+    has_password: false
   });
   const [useInfluxAuth, setUseInfluxAuth] = useState(false);
   const [savingInflux, setSavingInflux] = useState(false);
@@ -216,7 +218,9 @@ export default function SettingsPage() {
       bucket: '',
       username: '',
       password: '',
-      method: 'POST'
+      method: 'POST',
+    has_token: false,
+    has_password: false
     });
     setUseInfluxAuth(false);
     setInfluxSuccess('');
@@ -238,9 +242,11 @@ export default function SettingsPage() {
       bucket: server.bucket,
       username: server.username || '',
       password: server.password || '',
-      method: server.method || 'POST'
+      method: server.method || 'POST',
+      has_token: !!server.has_token,
+      has_password: !!server.has_password
     });
-    setUseInfluxAuth(!!(server.username || server.password));
+    setUseInfluxAuth(!!(server.username || server.has_password));
     setInfluxSuccess('');
     setInfluxError('');
     setInfluxTestSuccess('');
@@ -599,6 +605,7 @@ export default function () {
   const [loadingMyTokens, setLoadingMyTokens] = useState(false);
   const [myTokenName, setMyTokenName] = useState('');
   const [myTokenExpiry, setMyTokenExpiry] = useState(7);
+  const [myTokenMCPReadOnly, setMyTokenMCPReadOnly] = useState(false);
   const [myGeneratedToken, setMyGeneratedToken] = useState<APIToken | null>(null);
   const [isMyTokenModalOpen, setIsMyTokenModalOpen] = useState(false);
   const [copiedMyToken, setCopiedMyToken] = useState(false);
@@ -893,6 +900,7 @@ export default function () {
           issuer_url: config.issuer_url || '',
           client_id: config.client_id || '',
           client_secret: config.client_secret || '',
+          has_client_secret: config.has_client_secret,
           redirect_uri: config.redirect_uri || (typeof window !== 'undefined' ? `${window.location.origin}/login` : 'http://localhost:3000/login'),
           admin_groups: config.admin_groups !== undefined ? config.admin_groups : '',
           editor_groups: config.editor_groups !== undefined ? config.editor_groups : ''
@@ -920,9 +928,11 @@ export default function () {
           bucket: config.bucket || '',
           username: config.username || '',
           password: config.password || '',
-          method: config.method || 'POST'
+          method: config.method || 'POST',
+          has_token: !!config.has_token,
+          has_password: !!config.has_password
         });
-        setUseInfluxAuth(!!(config.username || config.password));
+        setUseInfluxAuth(!!(config.username || config.has_password));
         setInfluxEnvDefined(!!config.env_defined);
       }
     } catch (err) {
@@ -1164,7 +1174,7 @@ export default function () {
     setMyTokenCreating(true);
     setMyTokenError('');
     try {
-      const tok = await api.createMyToken(myTokenName, myTokenExpiry);
+      const tok = await api.createMyToken(myTokenName, myTokenExpiry, myTokenMCPReadOnly ? ["clusters:read", "tests:read", "metrics:read", "logs:read"] : undefined);
       setMyGeneratedToken(tok);
       setIsMyTokenModalOpen(true);
       setMyTokenName('');
@@ -1838,9 +1848,9 @@ export default function () {
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">{t('apiAuthToken')}</label>
                 <input
                   type="password"
-                  required
+                  required={!influxConfig.has_token}
                   disabled={influxEnvDefined}
-                  placeholder="••••••••••••••••••••••••"
+                  placeholder={t('leaveBlankToKeepSecret')}
                   value={influxConfig.token}
                   onChange={(e) => setInfluxConfig({ ...influxConfig, token: e.target.value })}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none font-mono disabled:opacity-55 disabled:cursor-not-allowed"
@@ -1880,9 +1890,9 @@ export default function () {
                       <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">{t('password')}</label>
                       <input
                         type="password"
-                        required
+                        required={!influxConfig.has_password}
                         disabled={influxEnvDefined}
-                        placeholder="••••••••"
+                        placeholder={t('leaveBlankToKeepPassword')}
                         value={influxConfig.password}
                         onChange={(e) => setInfluxConfig({ ...influxConfig, password: e.target.value })}
                         className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none font-mono disabled:opacity-55 disabled:cursor-not-allowed"
@@ -2302,7 +2312,7 @@ export default function () {
                       <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">{t('clientSecret') || 'Client Secret'}</label>
                       <input
                         type="password"
-                        placeholder="••••••••••••••••"
+                        placeholder={t('leaveBlankToKeepSecret')}
                         value={ssoConfig.client_secret || ''}
                         onChange={(e) => setSsoConfig({ ...ssoConfig, client_secret: e.target.value })}
                         className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:border-purple-500 outline-none font-mono text-xs"
@@ -2395,6 +2405,11 @@ export default function () {
                       ))}
                     </select>
                   </div>
+
+                  <label className="flex items-start gap-2 text-xs text-slate-300">
+                    <input type="checkbox" checked={myTokenMCPReadOnly} onChange={e => setMyTokenMCPReadOnly(e.target.checked)} className="mt-0.5" />
+                    <span>{t('mcpReadOnlyToken')}</span>
+                  </label>
 
                   {myTokenError && (
                     <p className="text-red-400 text-xs">{myTokenError}</p>

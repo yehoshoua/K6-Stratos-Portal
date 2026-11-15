@@ -148,6 +148,27 @@ describe("K6TestWizard steps", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("adds selected action variables to the new test", async () => {
+    render(
+      <K6TestWizard
+        open
+        advancedMode={false}
+        onClose={() => undefined}
+        onCreated={() => undefined}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /Smoke test/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Continuer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continuer" }));
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Amazon S3/ }));
+    expect(screen.getByDisplayValue("S3_PRESIGNED_URL")).toBeTruthy();
+    const s3Url = screen.getByLabelText("S3_PRESIGNED_URL") as HTMLInputElement;
+    fireEvent.change(s3Url, { target: { value: "https://bucket.s3.amazonaws.com/object" } });
+    expect(s3Url.value).toBe("https://bucket.s3.amazonaws.com/object");
+  });
+
   it("allows clicking stepper buttons to navigate steps", async () => {
     render(
       <K6TestWizard
@@ -221,4 +242,3 @@ describe("extractEnvVarsFromScript helper", () => {
     expect(vars.length).toBe(4);
   });
 });
-

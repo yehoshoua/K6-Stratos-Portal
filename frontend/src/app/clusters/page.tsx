@@ -199,9 +199,30 @@ export default function ClustersPage() {
                 if (!isEKS) return null;
                 const checking = addonsCheckingMap[cluster.id];
                 const addons = clusterAddonsMap[cluster.id] || [];
-                const pendingUpdates = addons.filter(addon => addon.current !== addon.recommended && addon.current !== 'unknown');
+                const pendingUpdates = addons.filter(addon => addon.current !== addon.recommended);
 
-                if (!checking && pendingUpdates.length === 0) {
+                if (checking) {
+                  return (
+                    <div className="p-4 bg-amber-500/5 border border-amber-500/15 rounded-2xl space-y-2.5 transition duration-300">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
+                          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 animate-bounce" />
+                          <span>{t('eksAddonUpdatesRecommended') || 'EKS Add-on Updates Recommended'}</span>
+                        </div>
+                        <span className="inline-flex items-center gap-1 text-[9px] font-semibold text-amber-500/80 uppercase tracking-wider animate-pulse">
+                          <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                          {t('checking') || 'Checking...'}
+                        </span>
+                      </div>
+                      <div className="space-y-2 py-1 pl-6">
+                        <div className="h-2 w-3/4 bg-amber-500/20 rounded-full animate-pulse"></div>
+                        <div className="h-2 w-1/2 bg-amber-500/20 rounded-full animate-pulse"></div>
+                      </div>
+                    </div>
+                  );
+                }
+
+                if (addons.length > 0 && pendingUpdates.length === 0) {
                   return (
                     <div className="p-4 bg-emerald-500/5 border border-emerald-500/15 rounded-2xl flex items-center gap-2.5 text-emerald-400 text-xs font-semibold transition duration-300">
                       <CheckCircle className="w-4 h-4 shrink-0 text-emerald-400" />
@@ -210,67 +231,34 @@ export default function ClustersPage() {
                   );
                 }
 
-                return (
-                  <div className="p-4 bg-amber-500/5 border border-amber-500/15 rounded-2xl space-y-2.5 transition duration-300">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
-                        <AlertTriangle className={`w-4 h-4 shrink-0 text-amber-400 ${checking ? 'animate-bounce' : ''}`} />
-                        <span>{t('eksAddonUpdatesRecommended') || 'EKS Add-on Updates Recommended'}</span>
-                      </div>
-                      {checking ? (
-                        <span className="inline-flex items-center gap-1 text-[9px] font-semibold text-amber-500/80 uppercase tracking-wider animate-pulse">
-                          <RefreshCw className="w-2.5 h-2.5 animate-spin" />
-                          {t('checking') || 'Checking...'}
-                        </span>
-                      ) : (
+                if (pendingUpdates.length > 0) {
+                  return (
+                    <div className="p-4 bg-amber-500/5 border border-amber-500/15 rounded-2xl space-y-2.5 transition duration-300">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
+                          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                          <span>{t('eksAddonUpdatesRecommended') || 'EKS Add-on Updates Recommended'}</span>
+                        </div>
                         <span className="text-[9px] font-semibold text-emerald-500 bg-emerald-500/10 border border-emerald-500/25 px-1.5 py-0.5 rounded-full uppercase tracking-wider">
                           {t('verified') || 'Verified'}
                         </span>
-                      )}
-                    </div>
-                    
-                    {checking ? (
-                      <div className="space-y-2 py-1 pl-6">
-                        <div className="h-2 w-3/4 bg-amber-500/20 rounded-full animate-pulse"></div>
-                        <div className="h-2 w-1/2 bg-amber-500/20 rounded-full animate-pulse"></div>
                       </div>
-                    ) : (
+                      
                       <div className="space-y-1.5 pl-6 text-[10px] text-slate-400 font-sans">
-                        {pendingUpdates.map((addon) => {
-                          const key = `${cluster.id}:${addon.name}`;
-                          const isUpgrading = upgradingAddonsMap[key];
-                          const upgradeError = upgradeErrorMap[key];
-                          return (
-                            <div key={addon.name} className="space-y-1 py-1 border-b border-amber-500/10 last:border-0">
-                              <div className="flex justify-between items-center gap-4">
-                                <span className="font-mono text-slate-300">{addon.name}</span>
-                                <div className="flex items-center gap-3">
-                                  <span className="font-mono text-[9px] text-slate-500">{addon.current} → <span className="text-amber-400 font-semibold">{addon.recommended}</span></span>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleUpgradeAddon(cluster.id, addon.name, addon.recommended)}
-                                    disabled={isUpgrading}
-                                    className="px-2 py-0.5 bg-amber-500/10 hover:bg-amber-500 text-amber-400 hover:text-slate-950 rounded border border-amber-500/20 text-[9px] font-bold cursor-pointer transition flex items-center gap-1 disabled:opacity-50"
-                                    title="Mettre à jour via EKS API"
-                                  >
-                                    {isUpgrading ? (
-                                      <RefreshCw className="w-2.5 h-2.5 animate-spin" />
-                                    ) : (
-                                      <span>Mettre à jour</span>
-                                    )}
-                                  </button>
-                                </div>
-                              </div>
-                              {upgradeError && (
-                                <p className="text-[9px] text-red-400 italic font-medium">{upgradeError}</p>
-                              )}
-                            </div>
-                          );
-                        })}
+                        {pendingUpdates.map((addon) => (
+                          <div key={addon.name} className="flex justify-between items-center gap-4 py-1 border-b border-amber-500/10 last:border-0">
+                            <span className="font-mono text-slate-300">{addon.name}</span>
+                            <span className="font-mono text-[9px] text-slate-500">
+                              {addon.current} → <span className="text-amber-400 font-semibold">{addon.recommended}</span>
+                            </span>
+                          </div>
+                        ))}
                       </div>
-                    )}
-                  </div>
-                );
+                    </div>
+                  );
+                }
+
+                return null;
               })()}
 
               {/* Actions */}

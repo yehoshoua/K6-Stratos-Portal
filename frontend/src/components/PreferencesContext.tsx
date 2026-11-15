@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { supplementalStrings } from '@/i18n/strings';
 import { api } from '@/services/api';
+import { paletteContrastVariables } from '@/utils/colorContrast';
 
 export type Language = 'en' | 'fr' | 'he' | 'zh' | 'es' | 'de';
 export type Theme = 'light' | 'dark' | 'system';
@@ -1510,6 +1511,7 @@ export function PreferencesProvider({ children }: { children: React.ReactNode })
         activeTheme = typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       }
 
+      root.setAttribute('data-color-scheme', activeTheme);
       const palette = palettes.find((p) => p.id === colorPalette);
       if (palette) {
         root.style.setProperty('--primary-dark', palette.colors.primaryDark, 'important');
@@ -1523,11 +1525,14 @@ export function PreferencesProvider({ children }: { children: React.ReactNode })
         root.style.setProperty('--accent-light', palette.colors.accentLight, 'important');
         root.style.setProperty('--accent-lightest', palette.colors.accentLightest, 'important');
         
-        const bg = activeTheme === 'dark' ? palette.colors.backgroundDark : palette.colors.backgroundLight;
+        const contrastVariables = paletteContrastVariables(palette.colors);
+        for (const [key, value] of Object.entries(contrastVariables)) root.style.setProperty(key, value);
+        const bg = contrastVariables[`--ui-background-${activeTheme}`];
         if (bg) {
           root.style.setProperty('--color-slate-950', bg, 'important');
         }
       } else {
+        for (const key of ['--ui-background-light', '--ui-background-dark', '--ui-primary-fill', '--ui-accent-fill', '--ui-primary-text-light', '--ui-primary-text-dark', '--ui-accent-text-light', '--ui-accent-text-dark']) root.style.removeProperty(key);
         // Clear custom properties
         root.style.removeProperty('--primary-dark');
         root.style.removeProperty('--primary-hover');
