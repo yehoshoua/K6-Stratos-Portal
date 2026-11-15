@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -129,11 +130,16 @@ func (s *AuthService) LoginLocal(username, password string) (string, string, err
 
 // GenerateToken generates a JWT token valid for 24 hours
 func (s *AuthService) GenerateToken(username, role string) (string, error) {
+	user, err := s.db.GetUser(username)
+	if err != nil || user == nil || user.Role != role {
+		return "", errors.New("account is unavailable")
+	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"username": username,
-		"role":     role,
-		"exp":      time.Now().Add(24 * time.Hour).Unix(),
-		"iat":      time.Now().Unix(),
+		"username":        username,
+		"role":            role,
+		"exp":             time.Now().Add(24 * time.Hour).Unix(),
+		"iat":             time.Now().Unix(),
+		"account_version": s.accountVersion(user),
 	})
 
 	tokenString, err := token.SignedString(s.jwtSecret)
@@ -147,11 +153,11 @@ func (s *AuthService) GenerateToken(username, role string) (string, error) {
 // ValidateToken parses and validates a JWT token
 func (s *AuthService) ValidateToken(tokenStr string) (string, string, error) {
 	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		if token.Method != jwt.SigningMethodHS256 {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return s.jwtSecret, nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired())
 
 	if err != nil {
 		return "", "", fmt.Errorf("invalid token: %w", err)
@@ -160,27 +166,20 @@ func (s *AuthService) ValidateToken(tokenStr string) (string, string, error) {
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
 		username, _ := claims["username"].(string)
 		role, _ := claims["role"].(string)
+		user, err := s.db.GetUser(username)
+		version, _ := claims["account_version"].(string)
+		if err != nil || user == nil || role != user.Role || version == "" || !hmac.Equal([]byte(version), []byte(s.accountVersion(user))) {
+			return "", "", errors.New("session revoked")
+		}
 		return username, role, nil
 	}
 
 	return "", "", errors.New("invalid claims")
 }
 
-// HandleSSOCallback is a legacy, unauthenticated demo/dev-only shortcut
-// (POST /api/auth/sso) that predates the real OIDC authorization-code
-// flow at /api/auth/sso/{url,callback}. It intentionally no longer maps
-// any user to an elevated role from their username or email: the
-// previous implementation granted "administrator" to any name or email
-// that merely *contained* the substring "admin" (e.g. "radmin.jones"),
-// which is a privilege-escalation bug, not a feature. Real role
-// assignment must come from exact, configured Azure AD group claims via
-// the OIDC callback (see handleSSOCallbackExchange in the server
-// package), or from an administrator explicitly setting a user's role.
-func (s *AuthService) HandleSSOCallback(ssoUser string, email string) (string, string, error) {
-	const role = "viewer"
-	token, err := s.GenerateToken(ssoUser, role)
-	if err != nil {
-		return "", "", err
-	}
-	return token, role, nil
+// accountVersion invalidates sessions when credentials, role or account identity change.
+func (s *AuthService) accountVersion(user *database.User) string {
+	h := hmac.New(sha256.New, s.jwtSecret)
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s", user.Username, user.PasswordHash, user.Salt, user.Role, user.CreatedAt.UTC().Format(time.RFC3339Nano))
+	return hex.EncodeToString(h.Sum(nil))
 }

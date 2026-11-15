@@ -38,12 +38,15 @@ func main() {
 		dbDSN = dbPath
 	}
 
-	log.Printf("Initializing database driver %s at: %s", dbDriver, dbDSN)
+	log.Printf("Initializing database driver %s", dbDriver)
 	db, err := database.InitDB(dbDriver, dbDSN)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer db.Close()
+	if err := db.BootstrapAdmin(os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")); err != nil {
+		log.Fatalf("Failed to bootstrap administrator: %v", err)
+	}
 
 	if err := db.SeedK6PortalTemplates(); err != nil {
 		log.Printf("Warning: failed to seed K6 portal templates: %v", err)

@@ -11,7 +11,6 @@ import (
 
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type DB struct {
@@ -374,24 +373,6 @@ func (db *DB) createTables() error {
 	}
 	if err := db.ensureWorkspaceAccessTables(); err != nil {
 		return fmt.Errorf("failed to initialize workspace access: %w", err)
-	}
-
-	// Seed default administrator user if users table is empty. Hashed
-	// with bcrypt like every other password from day one — there is no
-	// legacy SHA-256 seed to migrate here.
-	var count int
-	countQuery := db.rebind("SELECT COUNT(*) FROM users")
-	if err := db.conn.QueryRow(countQuery).Scan(&count); err == nil && count == 0 {
-		defaultHash, hashErr := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
-		if hashErr != nil {
-			return fmt.Errorf("failed to hash default administrator password: %w", hashErr)
-		}
-
-		seedQuery := db.rebind("INSERT INTO users (username, password_hash, salt, role, created_at) VALUES (?, ?, ?, ?, ?)")
-		_, seedErr := db.conn.Exec(seedQuery, "admin", string(defaultHash), "", "administrator", time.Now())
-		if seedErr != nil {
-			return fmt.Errorf("failed to seed default administrator user: %w", seedErr)
-		}
 	}
 
 	// Migration: Add namespaces column to clusters table if it does not exist
@@ -1091,7 +1072,13 @@ func isMissingColumnError(err error, column string) bool {
 		strings.Contains(msg, fmt.Sprintf("unknown column '%s'", col))
 }
 
-func (db *DB) SaveUser(u *User) error {
+func (db *DB) SaveUser(u *User) error { return db.saveUser(u, false) }
+
+// SaveSSOUser atomically refuses to replace a local account or another OIDC
+// identity, even if the account changes after the callback's initial lookup.
+func (db *DB) SaveSSOUser(u *User) error { return db.saveUser(u, true) }
+
+func (db *DB) saveUser(u *User, ssoOnly bool) error {
 	var query string
 	if db.driver == "postgres" {
 		query = `
@@ -1105,17 +1092,61 @@ func (db *DB) SaveUser(u *User) error {
 	} else {
 		query = `INSERT OR REPLACE INTO users (username, password_hash, salt, role, created_at) VALUES (?, ?, ?, ?, ?);`
 	}
-	_, err := db.conn.Exec(query, u.Username, u.PasswordHash, u.Salt, u.Role, u.CreatedAt)
-	return err
+	if ssoOnly {
+		if !strings.HasPrefix(u.Salt, "oidc:") || u.PasswordHash != "" {
+			return fmt.Errorf("invalid OIDC account")
+		}
+		query = db.rebind(`INSERT INTO users (username,password_hash,salt,role,created_at) VALUES (?,?,?,?,?)
+            ON CONFLICT (username) DO UPDATE SET salt=EXCLUDED.salt,role=EXCLUDED.role
+            WHERE users.password_hash = '' AND (users.salt=EXCLUDED.salt OR users.salt='sso_user')`)
+	}
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var oldHash, oldSalt, oldRole string
+	err = tx.QueryRow(db.rebind("SELECT password_hash, salt, role FROM users WHERE username = ?"), u.Username).Scan(&oldHash, &oldSalt, &oldRole)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err == nil && (oldHash != u.PasswordHash || oldSalt != u.Salt || oldRole != u.Role) {
+		if _, err := tx.Exec(db.rebind("DELETE FROM api_tokens WHERE owned_by = ?"), u.Username); err != nil {
+			return err
+		}
+	}
+	result, err := tx.Exec(query, u.Username, u.PasswordHash, u.Salt, u.Role, u.CreatedAt)
+	if err != nil {
+		return err
+	}
+	if ssoOnly {
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return fmt.Errorf("OIDC identity conflicts with an existing account")
+		}
+	}
+	return tx.Commit()
 }
 
 func (db *DB) DeleteUser(username string) error {
-	if err := db.DeleteWorkspaceUsersForUser(username); err != nil {
+	tx, err := db.conn.Begin()
+	if err != nil {
 		return err
 	}
-	query := db.rebind(`DELETE FROM users WHERE username = ?;`)
-	_, err := db.conn.Exec(query, username)
-	return err
+	defer tx.Rollback()
+	for _, table := range []string{"api_tokens", "workspace_users", "user_scopes", "users"} {
+		key := "username"
+		if table == "api_tokens" {
+			key = "owned_by"
+		}
+		if _, err := tx.Exec(db.rebind("DELETE FROM "+table+" WHERE "+key+" = ?"), username); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (db *DB) GetUsers() ([]*User, error) {
@@ -1201,12 +1232,12 @@ func (db *DB) GetSSOConfig() (*SSOConfig, error) {
 }
 
 type APIToken struct {
-	TokenHash string     `json:"token_hash"`
-	Name      string     `json:"name"`
-	Role      string     `json:"role"`
-	Scopes    string     `json:"scopes"`
-	// OwnedBy is empty for admin-managed tokens and set to the creator's
-	// username for self-service tokens created via POST /api/v1/me/tokens.
+	TokenHash string `json:"token_hash"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	Scopes    string `json:"scopes"`
+	// OwnedBy binds tokens to their issuer. It is empty only for legacy
+	// administrator-managed tokens, which should be reissued.
 	OwnedBy   string     `json:"owned_by"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at"`
@@ -1621,5 +1652,14 @@ func (db *DB) DeleteWorkspace(id string) error {
 	return tx.Commit()
 }
 
-
-
+func (db *DB) GetUserBySSOIdentity(identity string) (*User, error) {
+	var username string
+	err := db.conn.QueryRow(db.rebind("SELECT username FROM users WHERE salt = ? LIMIT 1"), identity).Scan(&username)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return db.GetUser(username)
+}

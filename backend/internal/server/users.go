@@ -33,9 +33,9 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type userResponse struct {
-		Username   string                               `json:"username"`
-		Role       string                               `json:"role"`
-		CreatedAt  time.Time                            `json:"created_at"`
+		Username   string                              `json:"username"`
+		Role       string                              `json:"role"`
+		CreatedAt  time.Time                           `json:"created_at"`
 		Workspaces []*database.UserWorkspaceMembership `json:"workspaces"`
 	}
 
@@ -79,6 +79,14 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if body.Role != "" && body.Role != "administrator" && body.Role != "editor" && body.Role != "viewer" && body.Role != RoleSecurityAuditor {
+		s.writeError(w, 400, "invalid role")
+		return
+	}
+	if body.Password != "" && (len(body.Password) < 12 || len(body.Password) > 72) {
+		s.writeError(w, 400, "password must contain 12-72 bytes")
+		return
+	}
 	requestedBy := r.Header.Get("X-User-Name")
 	rbacSubject := guardian.Subject{
 		Type:        guardian.SubjectRBACChange,
@@ -162,6 +170,14 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if body.Role != "" && body.Role != "administrator" && body.Role != "editor" && body.Role != "viewer" && body.Role != RoleSecurityAuditor {
+		s.writeError(w, 400, "invalid role")
+		return
+	}
+	if body.Password != "" && (len(body.Password) < 12 || len(body.Password) > 72) {
+		s.writeError(w, 400, "password must contain 12-72 bytes")
+		return
+	}
 	requestedBy := r.Header.Get("X-User-Name")
 	if body.Role != "" && body.Role != existing.Role {
 		rbacSubject := guardian.Subject{

@@ -1,10 +1,19 @@
 package server
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/oauth2"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,7 +31,7 @@ func (s *Server) handleGetSSOConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(c)
+	json.NewEncoder(w).Encode(publicSSOConfig(c))
 }
 
 func (s *Server) handleSetSSOConfig(w http.ResponseWriter, r *http.Request) {
@@ -48,13 +57,17 @@ func (s *Server) handleSetSSOConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if body.Enabled && (!secureOIDCURL(body.IssuerURL) || !secureOIDCURL(body.RedirectURI)) {
+		s.writeError(w, 400, "SSO issuer and redirect URI must use HTTPS")
+		return
+	}
 	if err := s.db.SaveSSOConfig(&body); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to save sso config: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(body)
+	json.NewEncoder(w).Encode(publicSSOConfig(&body))
 }
 
 func (s *Server) handleGetSSOStatus(w http.ResponseWriter, r *http.Request) {
@@ -73,190 +86,144 @@ func (s *Server) handleGetSSOStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"enabled": c.Enabled, "name": c.Name})
 }
 
-type OpenIDConfig struct {
-	AuthorizationEndpoint string `json:"authorization_endpoint"`
-	TokenEndpoint         string `json:"token_endpoint"`
-	UserinfoEndpoint      string `json:"userinfo_endpoint"`
+const oidcFlowCookie = "__Host-stratos-oidc"
+
+func secureOIDCURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.Fragment == ""
 }
 
-func getOpenIDConfig(issuerURL string) (*OpenIDConfig, error) {
-	wellKnown := strings.TrimSuffix(issuerURL, "/") + "/.well-known/openid-configuration"
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(wellKnown)
+func (s *Server) oidcProvider(ctx context.Context, c *database.SSOConfig) (*oidc.Provider, *oauth2.Config, error) {
+	if !secureOIDCURL(c.IssuerURL) || !secureOIDCURL(c.RedirectURI) {
+		return nil, nil, fmt.Errorf("SSO requires HTTPS issuer and redirect URI")
+	}
+	provider, err := oidc.NewProvider(ctx, c.IssuerURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer resp.Body.Close()
+	var discovery struct {
+		JWKSURL string `json:"jwks_uri"`
+	}
+	if err := provider.Claims(&discovery); err != nil || !secureOIDCURL(discovery.JWKSURL) {
+		return nil, nil, fmt.Errorf("OIDC JWKS endpoint requires HTTPS")
+	}
+	endpoint := provider.Endpoint()
+	if !secureOIDCURL(endpoint.AuthURL) || !secureOIDCURL(endpoint.TokenURL) {
+		return nil, nil, fmt.Errorf("OIDC endpoints require HTTPS")
+	}
+	return provider, &oauth2.Config{ClientID: c.ClientID, ClientSecret: c.ClientSecret, RedirectURL: c.RedirectURI, Endpoint: endpoint, Scopes: []string{oidc.ScopeOpenID, "profile", "email"}}, nil
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+func randomOIDCValue() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
 	}
-
-	var cfg OpenIDConfig
-	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func (s *Server) handleGetSSOAuthorizeURL(w http.ResponseWriter, r *http.Request) {
-	if s.db == nil {
-		http.Error(w, `{"error":"database not initialized"}`, http.StatusInternalServerError)
-		return
-	}
 	c, err := s.db.GetSSOConfig()
-	if err != nil || !c.Enabled {
-		http.Error(w, `{"error":"SSO not configured or disabled"}`, http.StatusBadRequest)
+	if err != nil || c == nil || !c.Enabled {
+		s.writeError(w, 400, "SSO disabled")
 		return
 	}
-
-	oidcCfg, err := getOpenIDConfig(c.IssuerURL)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	_, oauth, err := s.oidcProvider(ctx, c)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"Failed to fetch OpenID metadata: %v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, 502, "failed to discover SSO provider")
 		return
 	}
-
-	state := fmt.Sprintf("%d", time.Now().UnixNano())
-	authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&redirect_uri=%s&scope=openid+profile+email&state=%s",
-		oidcCfg.AuthorizationEndpoint,
-		c.ClientID,
-		c.RedirectURI,
-		state,
-	)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"url": authURL})
+	state, err := randomOIDCValue()
+	if err != nil {
+		s.writeError(w, 500, "failed to initialize SSO")
+		return
+	}
+	nonce, err := randomOIDCValue()
+	if err != nil {
+		s.writeError(w, 500, "failed to initialize SSO")
+		return
+	}
+	verifier := oauth2.GenerateVerifier()
+	flow := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"aud": "stratos-oidc-flow", "exp": time.Now().Add(5 * time.Minute).Unix(),
+		"state": state, "nonce": nonce, "verifier": verifier, "issuer": c.IssuerURL, "client": c.ClientID, "redirect": c.RedirectURI,
+	})
+	signed, err := flow.SignedString(s.config.JWTSecret)
+	if err != nil {
+		s.writeError(w, 500, "failed to initialize SSO")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: oidcFlowCookie, Value: signed, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 300})
+	w.Header().Set("Cache-Control", "no-store")
+	s.writeJSON(w, 200, map[string]string{"url": oauth.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))})
 }
 
 func (s *Server) handleSSOCallbackExchange(w http.ResponseWriter, r *http.Request) {
-	if s.db == nil {
-		http.Error(w, `{"error":"database not initialized"}`, http.StatusInternalServerError)
-		return
-	}
-	c, err := s.db.GetSSOConfig()
-	if err != nil || !c.Enabled {
-		http.Error(w, `{"error":"SSO disabled"}`, http.StatusBadRequest)
-		return
-	}
-
 	var body struct {
-		Code string `json:"code"`
+		Code  string `json:"code"`
+		State string `json:"state"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil || body.Code == "" || body.State == "" {
+		s.writeError(w, 400, "missing SSO code or state")
 		return
 	}
-
-	if body.Code == "" {
-		http.Error(w, `{"error":"missing auth code"}`, http.StatusBadRequest)
-		return
-	}
-
-	oidcCfg, err := getOpenIDConfig(c.IssuerURL)
+	cookie, err := r.Cookie(oidcFlowCookie)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to get OIDC configuration: %v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, 400, "missing SSO transaction")
 		return
 	}
-
-	exchangeClient := &http.Client{Timeout: 10 * time.Second}
-	data := fmt.Sprintf("grant_type=authorization_code&code=%s&client_id=%s&client_secret=%s&redirect_uri=%s",
-		body.Code,
-		c.ClientID,
-		c.ClientSecret,
-		c.RedirectURI,
-	)
-	req, err := http.NewRequest("POST", oidcCfg.TokenEndpoint, strings.NewReader(data))
+	parsed, err := jwt.Parse(cookie.Value, func(t *jwt.Token) (interface{}, error) { return s.config.JWTSecret, nil }, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired(), jwt.WithAudience("stratos-oidc-flow"))
+	if err != nil || !parsed.Valid {
+		s.writeError(w, 400, "invalid SSO transaction")
+		return
+	}
+	claims := parsed.Claims.(jwt.MapClaims)
+	value := func(key string) string { v, _ := claims[key].(string); return v }
+	if value("state") == "" || subtle.ConstantTimeCompare([]byte(body.State), []byte(value("state"))) != 1 {
+		s.writeError(w, 400, "invalid SSO state")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: oidcFlowCookie, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	c, err := s.db.GetSSOConfig()
+	if err != nil || c == nil || !c.Enabled || value("issuer") != c.IssuerURL || value("client") != c.ClientID || value("redirect") != c.RedirectURI {
+		s.writeError(w, 400, "SSO configuration changed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	provider, oauth, err := s.oidcProvider(ctx, c)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to construct token request: %v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, 502, "failed to discover SSO provider")
 		return
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := exchangeClient.Do(req)
+	token, err := oauth.Exchange(ctx, body.Code, oauth2.VerifierOption(value("verifier")))
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to perform token exchange: %v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, 401, "SSO exchange failed")
 		return
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		http.Error(w, fmt.Sprintf(`{"error":"token exchange failed with status %d"}`, resp.StatusCode), http.StatusBadRequest)
+	rawID, _ := token.Extra("id_token").(string)
+	idToken, err := provider.Verifier(&oidc.Config{ClientID: c.ClientID}).Verify(ctx, rawID)
+	if err != nil || idToken.Subject == "" || value("nonce") == "" || subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(value("nonce"))) != 1 {
+		s.writeError(w, 401, "invalid SSO identity")
 		return
 	}
-
-	var tokenResponse struct {
-		AccessToken string `json:"access_token"`
-		IDToken     string `json:"id_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to decode token response: %v"}`, err), http.StatusInternalServerError)
-		return
-	}
-
-	profileReq, err := http.NewRequest("GET", oidcCfg.UserinfoEndpoint, nil)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to construct userinfo request: %v"}`, err), http.StatusInternalServerError)
-		return
-	}
-	profileReq.Header.Set("Authorization", "Bearer "+tokenResponse.AccessToken)
-
-	profileResp, err := exchangeClient.Do(profileReq)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to fetch user info: %v"}`, err), http.StatusInternalServerError)
-		return
-	}
-	defer profileResp.Body.Close()
-
-	if profileResp.StatusCode != http.StatusOK {
-		http.Error(w, fmt.Sprintf(`{"error":"userinfo request failed with status %d"}`, profileResp.StatusCode), http.StatusBadRequest)
-		return
-	}
-
 	var userProfile struct {
-		Name          string   `json:"name"`
 		Email         string   `json:"email"`
-		PreferredName string   `json:"preferred_username"`
+		EmailVerified bool     `json:"email_verified"`
 		Groups        []string `json:"groups"`
 	}
-	if err := json.NewDecoder(profileResp.Body).Decode(&userProfile); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to decode user profile: %v"}`, err), http.StatusInternalServerError)
+	if err := idToken.Claims(&userProfile); err != nil {
+		s.writeError(w, 401, "invalid SSO claims")
 		return
 	}
-
-	username := userProfile.Email
-	if username == "" {
-		username = userProfile.PreferredName
+	// Identity is bound to issuer+subject, never to a mutable display name.
+	identityHash := sha256.Sum256([]byte(idToken.Issuer + "\x00" + idToken.Subject))
+	username := "oidc:" + hex.EncodeToString(identityHash[:])
+	if userProfile.EmailVerified && userProfile.Email != "" {
+		username = userProfile.Email
 	}
-	if username == "" {
-		username = userProfile.Name
-	}
-
-	if tokenResponse.IDToken != "" {
-		parts := strings.Split(tokenResponse.IDToken, ".")
-		if len(parts) >= 2 {
-			payloadSegment := parts[1]
-			if payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadSegment); err == nil {
-				var idTokenClaims struct {
-					Groups []string `json:"groups"`
-				}
-				if err := json.Unmarshal(payloadBytes, &idTokenClaims); err == nil {
-					for _, newG := range idTokenClaims.Groups {
-						exists := false
-						for _, oldG := range userProfile.Groups {
-							if oldG == newG {
-								exists = true
-								break
-							}
-						}
-						if !exists {
-							userProfile.Groups = append(userProfile.Groups, newG)
-						}
-					}
-				}
-			}
-		}
-	}
-
 	adminGroupsConfig := c.AdminGroups
 	editorGroupsConfig := c.EditorGroups
 
@@ -309,37 +276,42 @@ func (s *Server) handleSSOCallbackExchange(w http.ResponseWriter, r *http.Reques
 		role = "editor"
 	}
 
-	if s.db != nil {
-		existingUser, err := s.db.GetUser(username)
-		if err == nil {
-			if existingUser == nil {
-				newUser := &database.User{
-					Username:     username,
-					PasswordHash: "",
-					Salt:         "sso_user",
-					Role:         role,
-					CreatedAt:    time.Now(),
-				}
-				_ = s.db.SaveUser(newUser)
-			} else if existingUser.Role != role {
-				existingUser.Role = role
-				_ = s.db.SaveUser(existingUser)
-			}
-		}
-		_ = s.db.SyncUserWorkspaceMembershipsFromGroups(username, userProfile.Groups)
+	identity := "oidc:" + hex.EncodeToString(identityHash[:])
+	existing, err := s.db.GetUserBySSOIdentity(identity)
+	if err != nil {
+		s.writeError(w, 500, "failed to load identity")
+		return
 	}
-
+	if existing != nil {
+		username = existing.Username
+	} else {
+		existing, err = s.db.GetUser(username)
+		if err != nil {
+			s.writeError(w, 500, "failed to load account")
+			return
+		}
+		if existing != nil && (existing.Salt != "sso_user" || !userProfile.EmailVerified || username != userProfile.Email) {
+			s.writeError(w, 403, "SSO identity conflicts with an existing account")
+			return
+		}
+	}
+	if existing == nil {
+		existing = &database.User{Username: username, CreatedAt: time.Now()}
+	}
+	existing.Salt, existing.PasswordHash, existing.Role = identity, "", role
+	if err := s.db.SaveSSOUser(existing); err != nil {
+		s.writeError(w, 500, "failed to save account")
+		return
+	}
+	if err := s.db.SyncUserWorkspaceMembershipsFromGroups(username, userProfile.Groups); err != nil {
+		s.writeError(w, 500, "failed to sync memberships")
+		return
+	}
 	sessionToken, err := s.authSvc.GenerateToken(username, role)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to generate session: %v"}`, err), http.StatusInternalServerError)
+		s.writeError(w, 500, "failed to create session")
 		return
 	}
 	s.setSessionCookie(w, sessionToken)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"token":    sessionToken,
-		"username": username,
-		"role":     role,
-	})
+	s.writeJSON(w, 200, map[string]string{"username": username, "role": role})
 }

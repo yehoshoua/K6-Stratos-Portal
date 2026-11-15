@@ -152,20 +152,23 @@ func (s *Server) handleDeleteUserScope(w http.ResponseWriter, r *http.Request) {
 // the requested cluster (empty scope fields mean "any").
 func (s *Server) clusterAllowedForUser(username, clusterID, awsAccountID, environment string) bool {
 	if s.db == nil || username == "" {
-		return true
+		return false
 	}
 	scopes, err := s.db.GetUserScopes(username)
-	if err != nil || len(scopes) == 0 {
+	if err != nil {
+		return false
+	}
+	if len(scopes) == 0 {
 		return true
 	}
 	for _, sc := range scopes {
 		if sc.ClusterID != "" && sc.ClusterID != clusterID {
 			continue
 		}
-		if sc.AWSAccountID != "" && awsAccountID != "" && sc.AWSAccountID != awsAccountID {
+		if sc.AWSAccountID != "" && sc.AWSAccountID != awsAccountID {
 			continue
 		}
-		if sc.Environment != "" && environment != "" && sc.Environment != environment {
+		if sc.Environment != "" && sc.Environment != environment {
 			continue
 		}
 		return true
@@ -227,4 +230,18 @@ func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(logs)
+}
+
+func intersectScopes(requested, allowed string) string {
+	if hasScope(allowed, "admin:full") {
+		return requested
+	}
+	var result []string
+	for _, scope := range strings.Split(requested, ",") {
+		scope = strings.TrimSpace(scope)
+		if hasScope(allowed, scope) {
+			result = append(result, scope)
+		}
+	}
+	return strings.Join(result, ",")
 }

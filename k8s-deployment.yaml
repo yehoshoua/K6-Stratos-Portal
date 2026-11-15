@@ -91,6 +91,12 @@ spec:
               value: "production"
             - name: DATABASE_PATH
               value: "/data/dashboard.db"
+            - name: BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: bootstrap-admin-password
+                  optional: true # Required by the application only for an empty user database.
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:

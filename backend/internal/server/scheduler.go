@@ -224,14 +224,6 @@ func (s *Server) runScheduleTestRun(ctx context.Context, sched *database.TestSch
 	ctx, cancel := context.WithTimeout(ctx, scheduleRunTimeout)
 	defer cancel()
 
-	client, isMock, err := s.getClusterClient(sched.ClusterID)
-	if err != nil {
-		return fmt.Errorf("failed to get cluster client: %w", err)
-	}
-	if isMock {
-		return nil
-	}
-
 	template, err := s.db.GetTemplate(sched.TemplateID)
 	if err != nil || template == nil {
 		return fmt.Errorf("template not found")
@@ -244,10 +236,44 @@ func (s *Server) runScheduleTestRun(ctx context.Context, sched *database.TestSch
 		return fmt.Errorf("only testrun templates can create scheduled TestRuns")
 	}
 
-	clusterConfig := s.getClusterConfig(sched.ClusterID)
-
-	if sched.Namespace == "" {
-		sched.Namespace = "default"
+	clusterConfig := s.storedCluster(sched.ClusterID)
+	if clusterConfig == nil || workspaceID(clusterConfig.WorkspaceID) != workspaceID(template.WorkspaceID) {
+		return fmt.Errorf("schedule cluster and template must share a workspace")
+	}
+	if sched.Namespace == "" || sched.Namespace == "all" {
+		return fmt.Errorf("schedule requires a specific namespace")
+	}
+	if clusterConfig.Namespaces != "" && !containsString(strings.Split(strings.ReplaceAll(clusterConfig.Namespaces, " ", ""), ","), sched.Namespace) {
+		return fmt.Errorf("namespace is no longer allowed")
+	}
+	subject := s.buildScheduleSubject(sched, "scheduler")
+	if err := deterministicGuard(subject); err != nil {
+		return err
+	}
+	client, isMock, err := s.getClusterClient(sched.ClusterID)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster client: %w", err)
+	}
+	if isMock {
+		return nil
+	}
+	if template.ScriptContent == "" && template.ScriptName != "" {
+		cm, err := client.Clientset.CoreV1().ConfigMaps(sched.Namespace).Get(ctx, template.ScriptName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("cannot validate scheduled script: %w", err)
+		}
+		file := template.ScriptFile
+		if file == "" {
+			file = "script.js"
+		}
+		script := cm.Data[file]
+		if script == "" {
+			return fmt.Errorf("scheduled script is empty or missing")
+		}
+		subject.Payload["scriptContent"] = script
+		if err := deterministicGuard(subject); err != nil {
+			return err
+		}
 	}
 
 	baseName := sanitizeDNSLabel(sched.Name, maxBaseNameLength)

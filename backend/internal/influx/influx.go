@@ -155,6 +155,10 @@ func VerifyInfluxDBConnection(serverURL, version, token, username, password, met
 
 // QueryK6Metrics retrieves time-series aggregates of K6 metrics for a specific test run
 func (s *MetricsService) QueryK6Metrics(ctx context.Context, testRunID string, metricName string, durationRange string, startTime string, stopTime string, cluster string, namespace string) ([]TestMetricPoint, error) {
+	if err := validateMetricQuery(testRunID, metricName, durationRange, startTime, stopTime, cluster, namespace); err != nil {
+		return nil, err
+	}
+
 	if s.url == "" {
 		return []TestMetricPoint{}, nil
 	}
@@ -185,7 +189,7 @@ func (s *MetricsService) QueryK6Metrics(ctx context.Context, testRunID string, m
 		namespaceFilter = fmt.Sprintf(`|> filter(fn: (r) => r["namespace"] == "%s")`, namespace)
 	}
 
-	// Flux query parameterized to prevent injection
+	// Query inputs are validated before constructing Flux or InfluxQL.
 	fluxQuery := fmt.Sprintf(`
 		from(bucket: "%s")
 			|> %s

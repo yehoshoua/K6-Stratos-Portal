@@ -15,7 +15,7 @@ func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
 	var list []*ClusterConfig
 	var err error
 	if s.db != nil {
-		list, err = s.db.GetClusters()
+		list, err = s.visibleClusters(r)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to get clusters: %v"}`, err), http.StatusInternalServerError)
 			return
@@ -24,22 +24,21 @@ func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
 		list = make([]*ClusterConfig, 0)
 	}
 
-	username := r.Header.Get("X-User-Name")
 	visible := make([]*ClusterConfig, 0, len(list))
 	for _, c := range list {
-		// ABAC: if this user has scope rows, only surface clusters that
-		// match at least one of them (see clusterAllowedForUser in
-		// abac.go). Users with no scope rows see everything their role
-		// already permits — scoping is opt-in and fully backward
-		// compatible with existing single-tenant deployments.
-		if !s.clusterAllowedForUser(username, c.ID, c.AWSAccountID, c.Environment) {
-			continue
-		}
 		s.enrichClusterMetadata(r.Context(), c, true)
 		if c.KubernetesVersion == "" {
 			c.KubernetesVersion = s.queryKubernetesVersion(c.ID)
 		}
-		c.K6OperatorInstalled = s.checkK6OperatorInstalled(c.ID)
+		_, namespaces, accessErr := s.clusterAccess(r, c.ID, false)
+		if accessErr != nil {
+			continue
+		}
+		if namespaces == nil {
+			namespaces = []string{""}
+		}
+		client, mock, clientErr := s.getClusterClient(c.ID)
+		c.K6OperatorInstalled = mock || (clientErr == nil && s.checkK6OperatorWithClient(client, namespaces))
 		visible = append(visible, c)
 	}
 
@@ -58,7 +57,7 @@ func (s *Server) handleRegisterCluster(w http.ResponseWriter, r *http.Request) {
 		AWSAccountID string `json:"aws_account_id"` // AWS Account ID for ECR image resolution
 		ClusterARN   string `json:"cluster_arn"`    // Optional EKS cluster ARN
 		Region       string `json:"region"`
-		Environment  string `json:"environment"`    // dev | stage | prod | sandbox
+		Environment  string `json:"environment"` // dev | stage | prod | sandbox
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
@@ -117,6 +116,7 @@ func (s *Server) handleRegisterCluster(w http.ResponseWriter, r *http.Request) {
 		Name:          body.Name,
 		APIServerURL:  body.APIServerURL,
 		AuthType:      body.AuthType,
+		WorkspaceID:   workspaceID(r.Header.Get("X-Workspace-ID")),
 		EncryptedData: encryptedData,
 		CACertBase64:  body.CACertBase64,
 		CreatedAt:     time.Now(),
@@ -155,7 +155,7 @@ func (s *Server) handleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 		AWSAccountID string `json:"aws_account_id"` // AWS Account ID for ECR image resolution
 		ClusterARN   string `json:"cluster_arn"`    // Optional EKS cluster ARN
 		Region       string `json:"region"`
-		Environment  string `json:"environment"`    // dev | stage | prod | sandbox
+		Environment  string `json:"environment"` // dev | stage | prod | sandbox
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
@@ -222,6 +222,7 @@ func (s *Server) handleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 		Name:          body.Name,
 		APIServerURL:  body.APIServerURL,
 		AuthType:      body.AuthType,
+		WorkspaceID:   existing.WorkspaceID,
 		EncryptedData: encryptedData,
 		CACertBase64:  body.CACertBase64,
 		CreatedAt:     existing.CreatedAt,

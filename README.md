@@ -126,7 +126,7 @@ K6 Stratos is a full-stack web application that gives your team a single pane of
 
 | Method | Format | Use Case |
 |---|---|---|
-| Session JWT | `eyJ...` (in `localStorage`) | Interactive browser login |
+| Session JWT | `eyJ...` (Secure, HttpOnly cookie) | Interactive browser login |
 | API Token | `stratum_tok_<hash>` | CI/CD, webhooks, automation |
 
 ### Bearer Token Header
@@ -167,8 +167,9 @@ Authorization: Bearer <your_token_here>
 | `DB_TYPE` | Database driver (`sqlite` or `postgres`) | `sqlite` | `postgres` |
 | `DATABASE_URL` | PostgreSQL DSN or SQLite path | — | `postgres://user:pass@localhost/db` |
 | `DATABASE_PATH` | SQLite file path (fallback) | `~/.k6-bedrock-dashboard/dashboard.db` | `/data/dashboard.db` |
-| `ENCRYPTION_KEY` | Base64 32-byte AES-256-GCM key (cluster credentials at rest) | *auto-generated* | `dGhpcy1pcy1hLTMyLWJ5dGUtZGV2ZWxvcG1lbnQta2V5MSE=` |
-| `JWT_SECRET` | HMAC secret for signing JWTs | *default key* | `my-secure-jwt-secret` |
+| `ENCRYPTION_KEY` | Base64 encoding of exactly 32 bytes; required in production | Fixed development key only outside production | Generate once with `openssl rand -base64 32` |
+| `JWT_SECRET` | HMAC signing secret, at least 32 bytes in production | Required in production | Generate with `openssl rand -hex 32` |
+| `BOOTSTRAP_ADMIN_PASSWORD` | Initial `admin` password, 16–72 bytes; required only for an empty user database | None | Supply through your secret manager |
 
 ### Frontend (`frontend/`)
 
@@ -187,12 +188,13 @@ Authorization: Bearer <your_token_here>
 git clone https://github.com/your-org/k6-stratum-portal.git
 cd k6-stratum-portal
 
+# Set JWT_SECRET, ENCRYPTION_KEY and BOOTSTRAP_ADMIN_PASSWORD securely first.
 docker-compose up --build
 ```
 
 Portal available at **`https://localhost`** (self-signed TLS via Caddy `tls internal`).
 
-Default credentials: **`admin` / `admin`** — change immediately via Settings → Users.
+For a new database, set `BOOTSTRAP_ADMIN_PASSWORD` before starting. Sign in as **`admin`** with that password. No default password is created; existing accounts are preserved. For Kubernetes, supply `dashboard-secrets.bootstrap-admin-password` before the first launch. Remove the bootstrap secret after initialization.
 
 | Service | Container | Exposed Port |
 |---|---|---|
@@ -361,7 +363,7 @@ kubectl apply -f k8s-deployment.yaml
 ```bash
 TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin"}' | jq -r .token)
+  -d '{"username":"admin","password":"<your-password>"}' | jq -r .token)
 ```
 
 ### 2 — Deploy an immediate TestRun
@@ -468,13 +470,13 @@ k6-stratum-portal/
 ## 🔧 Local Development
 
 ### Prerequisites
-- Go 1.22+  |  Node.js 20+  |  Docker & Docker Compose
+- Go 1.26+  |  Node.js 20+  |  Docker & Docker Compose
 
 ### Run without Docker
 
 ```bash
 # Terminal 1 — Backend
-cd backend && go run ./...
+cd backend && go run ./cmd/api
 
 # Terminal 2 — Frontend
 cd frontend && npm install && npm run dev
@@ -494,8 +496,8 @@ cd frontend && npm run build
 
 ## 🔒 Security Notes
 
-- **Change `admin`/`admin`** immediately after first launch (Settings → Users)
-- **Rotate `JWT_SECRET` and `ENCRYPTION_KEY`** — use cryptographically random values of ≥ 32 bytes
+- **Provision the initial administrator explicitly** using `BOOTSTRAP_ADMIN_PASSWORD`; change any existing legacy `admin`/`admin` password.
+- **Use random production secrets.** Rotating `JWT_SECRET` invalidates sessions. Keep the existing encryption key when upgrading: changing `ENCRYPTION_KEY` requires re-encrypting stored credentials first.
 - **API Tokens** are SHA-256 hashed before storage; the plain token is shown only once
 - Cluster credentials (kubeconfig tokens) are encrypted at rest with **AES-256-GCM**
 - Caddy enforces **HTTPS** for all traffic in production
@@ -505,3 +507,124 @@ cd frontend && npm run build
 ## 📄 License
 
 Apache License 2.0 — see [LICENSE](./LICENSE) for details.
+
+
+### Security update migration
+
+- Existing browser sessions must log in again. Password/role changes and account deletion invalidate sessions and owned API tokens.
+- The anonymous legacy `POST /api/auth/sso` endpoint is removed. OIDC requires HTTPS issuer, discovery endpoints and redirect URI, signed ID tokens, state, nonce and PKCE. Identity uses `(issuer, subject)`; only verified email may link an existing legacy SSO account, never a local password account. Providers omitting `email_verified` receive an opaque stable username; review their workspace group mappings before rollout.
+- Production rejects malformed encryption keys instead of falling back to the development key. A previously supplied raw 32-byte key must be base64-encoded without changing its bytes. If an invalid old setting caused fallback encryption, migrate/re-encrypt those credentials before switching keys.
+- InfluxDB and SSO settings no longer return stored secrets. Blank secret fields preserve the saved value. The InfluxDB connection preview reuses credentials only when the endpoint matches the saved endpoint.
+- API tokens require the scope of the requested operation. New administrator-issued tokens are bound to their issuer. Reissue legacy unowned non-administrator tokens under an account with explicit workspace membership; they no longer inherit access through a display name.
+- Workspace membership and cluster/namespace scopes apply to direct resource URLs, payload references and list/aggregate endpoints. `namespace=all` only queries authorized namespaces. Templates and schedules must reference resources in the same workspace.
+- Scoped metrics requests must include both `cluster` and `namespace`. Legacy metrics without those tags are available only to an unrestricted platform administrator with no workspace selected; configure both tags on new runs.
+- Guardian validation IDs expire after ten minutes and must match the completed action, actor, environment, script, full workload and dataset contents. Deterministic policy blocks cannot be overridden. Omit the ID to use synchronous deterministic checks without AI advice.
+
+Local tests exercise SQLite, fake Kubernetes clients and a simulated OIDC provider. Validate your actual identity provider, PostgreSQL migration, Kubernetes RBAC and InfluxDB tags in staging before rollout. Recurring schedules still need a follow-up to persist an execution principal and recheck that principal's permissions at each tick; leader-loss cancellation and the SLA worker are separate follow-up work.
+
+
+## Guided HTTP tests and read-only MCP
+
+In **Tests → New test → Start an HTTP test**, select a cluster and namespace, then
+configure the URL, HTTP method, JSON body, virtual users, duration, p95 threshold
+and maximum error percentage. Review the generated k6 script, choose a TestRun,
+Job or CronJob, and complete the existing Guardian validation before launch.
+Bearer authentication references an **existing Kubernetes Secret in the selected
+namespace**; its value is injected into the runner, never embedded in the script.
+
+Save/restore retains one guided draft per account and workspace in the current
+browser. Drafts omit request bodies, URL query strings, scripts and environment
+values; re-enter these before reusing a draft. Launching also saves this sanitized
+draft. Drafts do not retain advanced output, image, schedule or dataset settings.
+
+New guided runs carry `cluster`, `namespace` and `test_run_id` telemetry tags.
+TestRuns use the generated resource name; Jobs and CronJob executions use their
+Job name through the Kubernetes downward API. k6-operator partitions TestRun VUs
+across runners. A plain Job executes the configured VUs in each parallel pod.
+**InfluxDB collection must already be configured** and the runner output enabled
+in the Resources step for charts and MCP metrics to receive data. The result link
+opens the relevant scope; a scheduled test appears after its first execution.
+
+### Build and connect the local MCP server
+
+From the repository root:
+
+```bash
+./scripts/build-mcp.sh
+```
+
+The server uses **stdio**: your MCP client starts it as a child process. There is
+no new listening port. The portal backend must be running.
+
+1. In **Settings → Security → My Tokens**, select **Read-only token for MCP**
+   and create a short-lived token. This selects only `clusters:read`,
+   `tests:read`, `metrics:read`, and `logs:read`. Access still
+   follows the issuing account's workspace, cluster and namespace permissions.
+2. Store the token alone in a private file outside the repository and run
+   `chmod 600 /absolute/path/to/stratos-token`. Personal tokens expire after at
+   most seven days; replace the file contents when renewing.
+3. In a client supporting the `mcpServers` JSON format, use this configuration,
+   replacing the absolute paths and workspace ID with your values:
+
+```json
+{
+  "mcpServers": {
+    "stratos-tests": {
+      "command": "/absolute/path/to/k6-stratos-portal/backend/bin/stratos-mcp",
+      "env": {
+        "STRATOS_URL": "http://127.0.0.1:8080",
+        "STRATOS_WORKSPACE_ID": "default",
+        "STRATOS_TOKEN_FILE": "/absolute/path/to/stratos-token"
+      }
+    }
+  }
+}
+```
+
+Other clients may use a different configuration format: the executable and
+these environment variables remain the same. `STRATOS_API_TOKEN` is an
+alternative to the token file; if both are set, the file takes precedence.
+Remote portal URLs require HTTPS and a trusted certificate; redirects are refused.
+This repository does not install the server into a particular AI client.
+
+| Tool | Purpose |
+| --- | --- |
+| `list_tests` | Discover accessible clusters and telemetry history, or live workloads with `cluster_id` and `namespace`; supports pagination and search. |
+| `get_test_status` | Read a TestRun, Job or CronJob's status and related pod names. For CronJobs, inspect the spawned Job to obtain its pods. |
+| `get_test_metrics` | Read a metric for an exact cluster, namespace and telemetry run ID, with a relative or explicit time window. |
+| `get_test_logs` | Read up to 100 recent pod log lines, capped at 20,000 characters. |
+| `compare_tests` | Compare the same metric and scope across two explicit windows of equal duration. |
+
+Example prompt: “List tests in my workspace, show the latest run's status and
+logs, then compare its request duration with the previous run.” No MCP tool
+launches, modifies or deletes tests. Workload scripts and environments are
+excluded from MCP status responses; application logs may still contain data
+printed by the tested application.
+
+Metrics are the API's **5-second means**. Comparisons report an unweighted mean
+of those available windows, not a request-weighted average or a p95. The p95
+threshold is evaluated by k6 itself. Missing telemetry is explicitly reported;
+it is never interpreted as success. MCP metric reads use `read_only=true` to
+prevent the portal's legacy on-read SLA alert writes.
+
+### Combined HTTP and chaos tests
+
+In **Tests → New test → Combined tests**, select HTTP, `pod_kill`, and/or
+`network_latency`, or use the **HTTP + chaos preset**. Configure the HTTP URL,
+concurrent users and duration, then the target pod label, fault start times,
+pod count, delay and application port. The target namespace is the namespace
+selected in the wizard. The execution timeline and generated script show the
+combination before Guardian preflight and launch.
+
+HTTP runs continuously in a separate k6 scenario. Each selected fault uses one
+iteration in its own scenario. Chaos configurations use a single runner to avoid
+multiplying fault execution; HTTP VUs can still be increased. When HTTP is
+selected, fault times must fit within its duration. Removing an action also
+removes its generated scenario and unused imports.
+
+The runner image must contain **xk6-disruptor**, and its Kubernetes credentials
+must allow the selected disruptions. `network_latency` uses the documented
+[PodDisruptor HTTP fault API](https://grafana.com/docs/k6/latest/testing-guides/injecting-faults-with-xk6-disruptor/xk6-disruptor/poddisruptor/injecthttpfaults/)
+on the unencrypted pod HTTP port; it is not a generic TCP/UDP network delay.
+Port 8000 is reserved for the injection proxy. Killing a pod removes faults
+injected into that pod; replacement pods do not automatically inherit them.

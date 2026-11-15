@@ -11,8 +11,7 @@
         "StringEquals": {
           "sts:ExternalId": "StratosEKSDiscoveryExternalID"
         }
-      },
-      "Comment": "Trust policy allowing the Stratos Portal role from the central management account to assume this role with an optional External ID for security."
+      }
     }
   ]
 }

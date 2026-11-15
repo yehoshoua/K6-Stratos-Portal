@@ -14,18 +14,21 @@ func (s *Server) workspaceAuth(requiredRole string, next http.HandlerFunc) http.
 		username := r.Header.Get("X-User-Name")
 		globalRole := r.Header.Get("X-User-Role")
 
-		// Global admins bypass workspace restrictions
-		if globalRole == "administrator" || globalRole == "admin" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		workspaceID := r.Header.Get("X-Workspace-ID")
 		if workspaceID == "" {
 			workspaceID = r.URL.Query().Get("workspace_id")
 		}
 		if workspaceID == "" {
 			workspaceID = "default"
+		}
+		if !workspaceIDPattern.MatchString(workspaceID) {
+			s.writeError(w, 400, "invalid workspace id")
+			return
+		}
+		r.Header.Set("X-Workspace-ID", workspaceID)
+		if globalRole == "administrator" || globalRole == "admin" {
+			next.ServeHTTP(w, r)
+			return
 		}
 
 		role, err := s.db.GetWorkspaceUserRole(workspaceID, username)
@@ -99,7 +102,7 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if input.ID == "" || input.Name == "" {
+	if !workspaceIDPattern.MatchString(input.ID) || input.Name == "" {
 		http.Error(w, `{"error":"id and name are required"}`, http.StatusBadRequest)
 		return
 	}

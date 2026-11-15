@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -107,6 +108,7 @@ func (s *Server) buildTestLaunchSubject(clusterID, namespace, name, scriptConten
 	payload := map[string]interface{}{
 		"name":          name,
 		"scriptContent": scriptContent,
+		"spec":          spec,
 	}
 	if cronExpression != "" {
 		payload["cronExpression"] = cronExpression
@@ -133,7 +135,7 @@ func (s *Server) buildTestLaunchSubject(clusterID, namespace, name, scriptConten
 	}
 
 	environment := ""
-	if cfg := s.getClusterConfig(clusterID); cfg != nil {
+	if cfg := s.storedCluster(clusterID); cfg != nil {
 		environment = normalizeEnvironment(cfg.Environment, cfg.Name)
 	}
 
@@ -172,7 +174,7 @@ func (s *Server) buildScheduleSubject(sched *database.TestSchedule, requestedBy 
 	}
 
 	environment := ""
-	if cfg := s.getClusterConfig(sched.ClusterID); cfg != nil {
+	if cfg := s.storedCluster(sched.ClusterID); cfg != nil {
 		environment = normalizeEnvironment(cfg.Environment, cfg.Name)
 	}
 
@@ -239,10 +241,34 @@ func (s *Server) handleGuardianValidate(w http.ResponseWriter, r *http.Request) 
 
 	requestedBy := r.Header.Get("X-User-Name")
 	subject := subjectFromRequest(body, requestedBy)
+	if body.SubjectType == guardian.SubjectTestLaunch || body.SubjectType == guardian.SubjectScheduleNew {
+		if body.ClusterID == "" || body.Namespace == "" || body.Namespace == "all" {
+			s.writeError(w, 400, "cluster and namespace required")
+			return
+		}
+		var workload workloadRequest
+		encoded, err := json.Marshal(body.Payload)
+		if err != nil || json.Unmarshal(encoded, &workload) != nil {
+			s.writeError(w, 400, "invalid workload")
+			return
+		}
+		if workload.Name == "" {
+			workload.Name = body.SubjectRef
+		}
+		subject, err = s.workloadSubject(r.Context(), body.ClusterID, body.Namespace, workload, requestedBy)
+		if err != nil {
+			s.writeError(w, 400, err.Error())
+			return
+		}
+	}
 
 	// Run the (potentially multi-second, LLM-backed) evaluation in the
 	// background; the frontend streams live progress over SSE.
 	runID := "val_" + uuid.New().String()
+	if err := s.persistPendingValidation(runID, subject); err != nil {
+		s.writeError(w, 500, "failed to save validation")
+		return
+	}
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
@@ -262,26 +288,11 @@ func (s *Server) handleGuardianValidate(w http.ResponseWriter, r *http.Request) 
 // pre-allocate the run id, so the HTTP handler can hand it back to the
 // client before evaluation completes.
 func (s *Server) runGuardianWithID(ctx context.Context, runID string, subject guardian.Subject, publish bool) guardian.Report {
-	now := time.Now()
-	payloadJSON, _ := json.Marshal(subject.Payload)
-	run := &database.ValidationRun{
-		ID:             runID,
-		SubjectType:    subject.Type,
-		SubjectRef:     subject.Ref,
-		RequestedBy:    subject.RequestedBy,
-		ClusterID:      subject.ClusterID,
-		Namespace:      subject.Namespace,
-		Environment:    subject.Environment,
-		PayloadJSON:    string(payloadJSON),
-		OverallVerdict: "pending",
-		CreatedAt:      now,
-	}
-	if s.db != nil {
-		if err := s.db.CreateValidationRun(run); err != nil {
-			log.Printf("guardian: failed to persist validation run %s: %v", runID, err)
+	if !publish {
+		if err := s.persistPendingValidation(runID, subject); err != nil {
+			return guardian.Report{Verdict: guardian.VerdictBlock}
 		}
 	}
-
 	onFinding := func(f guardian.Finding) {
 		if s.db != nil {
 			_ = s.db.AddValidationFinding(&database.ValidationFinding{
@@ -347,6 +358,8 @@ func (s *Server) handleGuardianStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	completionTicker := time.NewTicker(time.Second)
+	defer completionTicker.Stop()
 	ch := s.guardianBus.subscribe(runID)
 	defer s.guardianBus.unsubscribe(runID, ch)
 
@@ -360,6 +373,10 @@ func (s *Server) handleGuardianStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-completionTicker.C:
+			if s.replayCompletedGuardianRun(w, runID, send) {
+				return
+			}
 		case ev, open := <-ch:
 			if !open {
 				return
@@ -438,13 +455,18 @@ func (s *Server) handleGuardianListRuns(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(runs)
+	visible := make([]*database.ValidationRun, 0, len(runs))
+	for _, run := range runs {
+		if (isAdmin(r) || run.RequestedBy == r.Header.Get("X-User-Name")) && (run.ClusterID == "" || s.authorizeCluster(r, run.ClusterID, run.Namespace, false) == nil) {
+			visible = append(visible, run)
+		}
+	}
+	json.NewEncoder(w).Encode(visible)
 }
 
 // handleGuardianOverride lets an administrator proceed past a BLOCK
-// verdict (including a deterministic, unbypassable policy block) with a
-// mandatory, audited justification. This is the "approval workflow for
-// dangerous actions in production" called out in the original spec.
+// advisory verdict with a mandatory, audited justification. Deterministic
+// safety rules are never bypassable.
 func (s *Server) handleGuardianOverride(w http.ResponseWriter, r *http.Request) {
 	if s.db == nil {
 		http.Error(w, `{"error":"database not initialized"}`, http.StatusInternalServerError)
@@ -459,6 +481,22 @@ func (s *Server) handleGuardianOverride(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	run, err := s.db.GetValidationRun(id)
+	if err != nil || run == nil || run.CompletedAt == nil || run.OverallVerdict != "block" {
+		s.writeError(w, 400, "validation must be a completed block")
+		return
+	}
+	findings, err := s.db.GetValidationFindings(id)
+	if err != nil {
+		s.writeError(w, 500, "failed to read validation")
+		return
+	}
+	for _, finding := range findings {
+		if finding.AgentName == guardian.PolicyEngineName && finding.Severity == "block" {
+			s.writeError(w, 403, "deterministic safety rules cannot be overridden")
+			return
+		}
+	}
 	overrideBy := r.Header.Get("X-User-Name")
 	if err := s.db.OverrideValidationRun(id, overrideBy, body.Note); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
@@ -481,31 +519,64 @@ func (s *Server) handleGuardianOverride(w http.ResponseWriter, r *http.Request) 
 // synchronous deterministic-only check inline so dangerous actions are
 // never completely unguarded, while remaining backward compatible with
 // existing automation.
+// guardianGate binds advisory results to the exact current action. Hard policies
+// are always re-evaluated and cannot be overridden by a stale or unrelated result.
 func (s *Server) guardianGate(ctx context.Context, r *http.Request, subject guardian.Subject, suppliedRunID string) error {
-	if s.guardianCoordinator == nil {
-		return nil
+	if err := deterministicGuard(subject); err != nil {
+		return err
 	}
-
 	if suppliedRunID == "" {
-		runID := "val_" + uuid.New().String()
-		report := s.runGuardianWithID(ctx, runID, subject, false)
-		if report.Verdict == guardian.VerdictBlock {
-			return fmt.Errorf("blocked by Guardian preflight checks (validation_run_id=%s): %s", runID, summarizeBlockingFindings(report))
-		}
 		return nil
 	}
-
 	if s.db == nil {
-		return nil
+		return fmt.Errorf("validation storage unavailable")
 	}
 	run, err := s.db.GetValidationRun(suppliedRunID)
 	if err != nil || run == nil {
-		return fmt.Errorf("validation_run_id %q not found; run a preflight check first", suppliedRunID)
+		return fmt.Errorf("Guardian validation not found")
 	}
-	if run.OverallVerdict != string(guardian.VerdictBlock) || run.Overridden {
-		return nil
+	if run.CompletedAt == nil || time.Since(run.CreatedAt) > 10*time.Minute || run.CreatedAt.After(time.Now().Add(time.Minute)) {
+		return fmt.Errorf("Guardian validation is incomplete or expired")
 	}
-	return fmt.Errorf("blocked by Guardian: validation run %s was rejected and has not been overridden by an administrator", suppliedRunID)
+	if run.OverallVerdict != "pass" && run.OverallVerdict != "warn" && run.OverallVerdict != "block" {
+		return fmt.Errorf("invalid Guardian verdict")
+	}
+	if run.RequestedBy != subject.RequestedBy || run.SubjectType != subject.Type || run.SubjectRef != subject.Ref || run.ClusterID != subject.ClusterID || run.Namespace != subject.Namespace || run.Environment != subject.Environment {
+		return fmt.Errorf("Guardian validation does not match this action")
+	}
+	var previous map[string]interface{}
+	if json.Unmarshal([]byte(run.PayloadJSON), &previous) != nil {
+		return fmt.Errorf("invalid Guardian payload")
+	}
+	before, _ := json.Marshal(previous)
+	after, err := json.Marshal(subject.Payload)
+	if err != nil || !bytes.Equal(before, after) {
+		return fmt.Errorf("Guardian validation payload changed; validate again")
+	}
+	if run.OverallVerdict == "block" && !run.Overridden {
+		return fmt.Errorf("blocked by Guardian")
+	}
+	return nil
+}
+
+func deterministicGuard(subject guardian.Subject) error {
+	for _, finding := range guardian.EvaluatePolicy(subject) {
+		if finding.Severity == guardian.SeverityBlock {
+			return fmt.Errorf("blocked by Guardian: %s", finding.Message)
+		}
+	}
+	return nil
+}
+
+func (s *Server) persistPendingValidation(id string, subject guardian.Subject) error {
+	payload, err := json.Marshal(subject.Payload)
+	if err != nil {
+		return err
+	}
+	if s.db == nil {
+		return fmt.Errorf("database unavailable")
+	}
+	return s.db.CreateValidationRun(&database.ValidationRun{ID: id, SubjectType: subject.Type, SubjectRef: subject.Ref, RequestedBy: subject.RequestedBy, ClusterID: subject.ClusterID, Namespace: subject.Namespace, Environment: subject.Environment, PayloadJSON: string(payload), OverallVerdict: "pending", CreatedAt: time.Now()})
 }
 
 func summarizeBlockingFindings(report guardian.Report) string {

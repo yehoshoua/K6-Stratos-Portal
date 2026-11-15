@@ -45,7 +45,7 @@ func (s *Server) handleFleetSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clusters, err := s.db.GetClusters()
+	clusters, err := s.visibleClusters(r)
 	if err != nil {
 		http.Error(w, `{"error":"failed to load clusters"}`, http.StatusInternalServerError)
 		return
@@ -72,17 +72,12 @@ func (s *Server) handleFleetSummary(w http.ResponseWriter, r *http.Request) {
 			}
 			status.Online = true
 
-			namespaces := []string{"default"}
-			if c.Namespaces != "" {
-				var cleaned []string
-				for _, p := range strings.Split(c.Namespaces, ",") {
-					if t := strings.TrimSpace(p); t != "" {
-						cleaned = append(cleaned, t)
-					}
-				}
-				if len(cleaned) > 0 {
-					namespaces = cleaned
-				}
+			_, namespaces, err := s.clusterAccess(r, c.ID, false)
+			if err != nil {
+				return nil
+			}
+			if namespaces == nil {
+				namespaces = []string{""}
 			}
 
 			if isMock {
@@ -129,7 +124,7 @@ func (s *Server) handleFleetSummary(w http.ResponseWriter, r *http.Request) {
 	activeSchedules := 0
 	if schedules, err := s.db.GetSchedules(); err == nil {
 		for _, sch := range schedules {
-			if sch.Active {
+			if sch.Active && s.scheduleAccess(r, sch, false) {
 				activeSchedules++
 			}
 		}
@@ -138,14 +133,14 @@ func (s *Server) handleFleetSummary(w http.ResponseWriter, r *http.Request) {
 	openBlocks := 0
 	if runs, err := s.db.ListValidationRuns(100, 0); err == nil {
 		for _, run := range runs {
-			if run.OverallVerdict == "block" && !run.Overridden {
+			if (isAdmin(r) || run.RequestedBy == r.Header.Get("X-User-Name")) && run.OverallVerdict == "block" && !run.Overridden && (run.ClusterID == "" || s.authorizeCluster(r, run.ClusterID, run.Namespace, false) == nil) {
 				openBlocks++
 			}
 		}
 	}
 
 	recentAlerts := 0
-	if alerts, err := s.db.GetAlerts(); err == nil {
+	if alerts, err := s.db.GetAlerts(); err == nil && s.unrestrictedAdmin(r) {
 		recentAlerts = len(alerts)
 	}
 

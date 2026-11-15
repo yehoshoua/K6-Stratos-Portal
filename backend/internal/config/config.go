@@ -37,22 +37,12 @@ func LoadConfig() (*Config, error) {
 
 	production := strings.EqualFold(os.Getenv("APP_ENV"), "production")
 	encKeyStr := os.Getenv("ENCRYPTION_KEY")
-	if encKeyStr == "" {
-		if production {
-			return nil, errors.New("ENCRYPTION_KEY is required when APP_ENV=production")
-		}
-		// Provide a default key for development/demo (32 bytes for AES-256)
-		encKeyStr = "dGhpcy1pcy1hLTMyLWJ5dGUtZGV2ZWxvcG1lbnQta2V5MSE=" // "this-is-a-32-byte-development-key1!" base64 encoded
+	if encKeyStr == "" && !production {
+		encKeyStr = base64.StdEncoding.EncodeToString([]byte("dev-key-must-be-exactly-32bytes!"))
 	}
 	encKey, err := base64.StdEncoding.DecodeString(encKeyStr)
 	if err != nil || len(encKey) != 32 {
-		// fallback to raw string if it's 32 bytes or generate a random one
-		if len(encKeyStr) == 32 {
-			encKey = []byte(encKeyStr)
-		} else {
-			// Generate fallback key for dev
-			encKey = []byte("dev-key-must-be-exactly-32bytes!")
-		}
+		return nil, errors.New("ENCRYPTION_KEY must be a base64-encoded 32-byte key")
 	}
 
 	jwtSecretStr := os.Getenv("JWT_SECRET")

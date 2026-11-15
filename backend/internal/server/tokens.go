@@ -117,9 +117,8 @@ func (s *Server) handleGenerateAPIToken(w http.ResponseWriter, r *http.Request) 
 		expiresAt = &exp
 	}
 
-	// Admin-managed tokens have owned_by="" to distinguish them from
-	// self-service tokens in the ListAPITokens admin view.
-	if err := s.db.SaveAPIToken(tokenHash, body.Name, body.Role, scopesStr, "", expiresAt); err != nil {
+	// Bind the token to its issuer so resource restrictions cannot be bypassed.
+	if err := s.db.SaveAPIToken(tokenHash, body.Name, body.Role, scopesStr, requestedBy, expiresAt); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to save API token: %v"}`, err), http.StatusInternalServerError)
 		return
 	}

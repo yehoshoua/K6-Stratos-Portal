@@ -217,7 +217,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Auth routes
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
-	mux.HandleFunc("POST /api/auth/sso", s.handleSSO)
 	mux.HandleFunc("GET /api/auth/me", s.authMiddleware(s.handleMe))
 
 	// K8s Clusters routes (read public, write admin-only)
@@ -247,7 +246,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/settings/influxdb/servers", s.authMiddleware(s.adminOnly(s.handleCreateInfluxServer)))
 	mux.HandleFunc("PUT /api/settings/influxdb/servers/{id}", s.authMiddleware(s.adminOnly(s.handleUpdateInfluxServer)))
 	mux.HandleFunc("DELETE /api/settings/influxdb/servers/{id}", s.authMiddleware(s.adminOnly(s.handleDeleteInfluxServer)))
-	mux.HandleFunc("POST /api/settings/influxdb/servers/{id}/activate", s.authMiddleware(s.handleActivateInfluxServer))
+	mux.HandleFunc("POST /api/settings/influxdb/servers/{id}/activate", s.authMiddleware(s.adminOnly(s.handleActivateInfluxServer)))
 
 	// Settings User Management routes (admin only)
 	mux.HandleFunc("GET /api/settings/users", s.authMiddleware(s.adminOnly(s.handleListUsers)))
@@ -448,6 +447,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		r.Header.Del("X-Auth-Kind")
 		var username, role, scopes string
 
 		if strings.HasPrefix(tokenStr, "stratum_tok_") {
@@ -467,13 +467,25 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 
-			username = "api-token:" + tok.Name
+			r.Header.Set("X-Auth-Kind", "token")
+			username = "api-token:" + tok.TokenHash
 			role = tok.Role
 			scopes = tok.Scopes
 			if scopes == "" {
 				// Default scopes backfilled for legacy database tokens
 				scopes = scopesForRole(role)
 			}
+			// Personal tokens remain bound to the current owner and their current role.
+			if tok.OwnedBy != "" {
+				owner, err := s.db.GetUser(tok.OwnedBy)
+				if err != nil || owner == nil {
+					s.writeError(w, 401, "token owner is unavailable")
+					return
+				}
+				username = owner.Username
+				scopes = intersectScopes(scopes, scopesForRole(owner.Role))
+			}
+			scopes = intersectScopes(scopes, scopesForRole(role))
 		} else {
 			// Validate JWT User Token
 			var err error
@@ -491,6 +503,16 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		r.Header.Set("X-User-Role", role)
 		r.Header.Set("X-User-Scopes", scopes)
 
+		if r.Header.Get("X-Auth-Kind") == "token" {
+			required := requiredTokenScope(r)
+			if required == "session-only" || (required != "" && !hasScope(scopes, "admin:full") && !hasScope(scopes, required)) {
+				s.writeError(w, 403, "API token scope does not permit this operation")
+				return
+			}
+		}
+		if !s.authorizeRequest(w, r) {
+			return
+		}
 		next.ServeHTTP(w, r)
 	}
 }
@@ -502,7 +524,7 @@ func (s *Server) adminOnly(next http.HandlerFunc) http.HandlerFunc {
 		role := r.Header.Get("X-User-Role")
 		scopes := r.Header.Get("X-User-Scopes")
 		hasAdminScope := hasScope(scopes, "admin:full")
-		if !hasAdminScope && role != "administrator" && role != "admin" {
+		if (r.Header.Get("X-Auth-Kind") == "token" && !hasAdminScope) || (!hasAdminScope && role != "administrator" && role != "admin") {
 			http.Error(w, `{"error":"forbidden: administrator role or admin:full scope required"}`, http.StatusForbidden)
 			return
 		}
@@ -584,31 +606,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleSSO(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		User  string `json:"user"`
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
-		return
-	}
-
-	token, role, err := s.authSvc.HandleSSOCallback(body.User, body.Email)
-	if err != nil {
-		http.Error(w, `{"error":"SSO authentication failed"}`, http.StatusInternalServerError)
-		return
-	}
-	s.setSessionCookie(w, token)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"token":    token,
-		"username": body.User,
-		"role":     role,
-	})
-}
-
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
@@ -630,7 +627,13 @@ func (s *Server) handleListTestRuns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(runs)
+	visible := make([]influx.TestRunSummary, 0, len(runs))
+	for _, run := range runs {
+		if s.metricRunAllowed(r, run) {
+			visible = append(visible, run)
+		}
+	}
+	json.NewEncoder(w).Encode(visible)
 }
 
 func (s *Server) handleInfluxStatus(w http.ResponseWriter, r *http.Request) {
@@ -652,6 +655,9 @@ func (s *Server) checkSLATemplate(runID string) *database.K6Template {
 }
 
 func (s *Server) handleGetRunMetrics(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeMetricQuery(w, r) {
+		return
+	}
 	runID := r.PathValue("run_id")
 	metric := r.URL.Query().Get("metric") // e.g. "vus", "http_req_duration"
 	if metric == "" {
@@ -679,44 +685,46 @@ func (s *Server) handleGetRunMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check SLA thresholds in background
-	go func(runID string, m string, pts []influx.TestMetricPoint) {
-		tmpl := s.checkSLATemplate(runID)
-		if tmpl == nil || tmpl.SLAThresholds == "" {
-			return
-		}
-		var thresholds []struct {
-			Metric   string  `json:"metric"`
-			Operator string  `json:"operator"` // ">" or "<"
-			Value    float64 `json:"value"`
-		}
-		if err := json.Unmarshal([]byte(tmpl.SLAThresholds), &thresholds); err != nil {
-			return
-		}
+	// Read-only consumers must not create alerts as a side effect of reading.
+	if r.URL.Query().Get("read_only") != "true" {
+		go func(runID string, m string, pts []influx.TestMetricPoint) {
+			tmpl := s.checkSLATemplate(runID)
+			if tmpl == nil || tmpl.SLAThresholds == "" {
+				return
+			}
+			var thresholds []struct {
+				Metric   string  `json:"metric"`
+				Operator string  `json:"operator"` // ">" or "<"
+				Value    float64 `json:"value"`
+			}
+			if err := json.Unmarshal([]byte(tmpl.SLAThresholds), &thresholds); err != nil {
+				return
+			}
 
-		for _, pt := range pts {
-			for _, th := range thresholds {
-				if th.Metric == m {
-					violated := false
-					if th.Operator == ">" && pt.Value > th.Value {
-						violated = true
-					} else if th.Operator == "<" && pt.Value < th.Value {
-						violated = true
-					}
-					if violated {
-						alert := &database.TestAlert{
-							TestRunID: runID,
-							Metric:    m,
-							Threshold: fmt.Sprintf("%s %s %v", m, th.Operator, th.Value),
-							Value:     pt.Value,
-							Timestamp: pt.Timestamp,
+			for _, pt := range pts {
+				for _, th := range thresholds {
+					if th.Metric == m {
+						violated := false
+						if th.Operator == ">" && pt.Value > th.Value {
+							violated = true
+						} else if th.Operator == "<" && pt.Value < th.Value {
+							violated = true
 						}
-						_ = s.db.SaveAlert(alert)
+						if violated {
+							alert := &database.TestAlert{
+								TestRunID: runID,
+								Metric:    m,
+								Threshold: fmt.Sprintf("%s %s %v", m, th.Operator, th.Value),
+								Value:     pt.Value,
+								Timestamp: pt.Timestamp,
+							}
+							_ = s.db.SaveAlert(alert)
+						}
 					}
 				}
 			}
-		}
-	}(runID, metric, points)
+		}(runID, metric, points)
+	}
 
 	json.NewEncoder(w).Encode(points)
 }
@@ -732,7 +740,7 @@ func (s *Server) handleGetInfluxDBConfig(w http.ResponseWriter, r *http.Request)
 			"name":        "Environment Config",
 			"version":     "v2",
 			"url":         s.config.InfluxURL,
-			"token":       s.config.InfluxToken,
+			"has_token":   s.config.InfluxToken != "",
 			"org":         s.config.InfluxOrg,
 			"bucket":      s.config.InfluxBucket,
 			"username":    "",
@@ -749,18 +757,18 @@ func (s *Server) handleGetInfluxDBConfig(w http.ResponseWriter, r *http.Request)
 		if err == nil && active != nil {
 			// convert to map to add env_defined field
 			m := map[string]interface{}{
-				"id":          active.ID,
-				"name":        active.Name,
-				"version":     active.Version,
-				"url":         active.URL,
-				"token":       active.Token,
-				"org":         active.Org,
-				"bucket":      active.Bucket,
-				"username":    active.Username,
-				"password":    active.Password,
-				"method":      active.Method,
-				"is_active":   active.IsActive,
-				"env_defined": false,
+				"id":           active.ID,
+				"name":         active.Name,
+				"version":      active.Version,
+				"url":          active.URL,
+				"has_token":    active.Token != "",
+				"org":          active.Org,
+				"bucket":       active.Bucket,
+				"username":     active.Username,
+				"has_password": active.Password != "",
+				"method":       active.Method,
+				"is_active":    active.IsActive,
+				"env_defined":  false,
 			}
 			json.NewEncoder(w).Encode(m)
 			return
@@ -808,6 +816,14 @@ func (s *Server) handleSetInfluxDBConfig(w http.ResponseWriter, r *http.Request)
 		body.Method = "POST"
 	}
 
+	if existing, err := s.db.GetActiveInfluxConfig(); err == nil && existing != nil {
+		if body.Token == "" {
+			body.Token = existing.Token
+		}
+		if body.Password == "" {
+			body.Password = existing.Password
+		}
+	}
 	// Verify connection before saving (warn but do not block)
 	var warningMsg string
 	err := influx.VerifyInfluxDBConnection(body.URL, body.Version, body.Token, body.Username, body.Password, body.Method)
@@ -893,6 +909,18 @@ func (s *Server) handleTestInfluxDBConfig(w http.ResponseWriter, r *http.Request
 		body.Method = "POST"
 	}
 
+	// Use stored credentials only for the same endpoint; never forward a saved
+	// secret to a replacement URL during a connection preview.
+	if s.db != nil {
+		if existing, err := s.db.GetActiveInfluxConfig(); err == nil && existing != nil && existing.URL == body.URL {
+			if body.Token == "" {
+				body.Token = existing.Token
+			}
+			if body.Password == "" && body.Username == existing.Username {
+				body.Password = existing.Password
+			}
+		}
+	}
 	err := influx.VerifyInfluxDBConnection(body.URL, body.Version, body.Token, body.Username, body.Password, body.Method)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"Connection check failed: %v"}`, err), http.StatusBadRequest)
@@ -914,7 +942,11 @@ func (s *Server) handleListInfluxServers(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
+	public := make([]influxConfigResponse, 0, len(list))
+	for _, item := range list {
+		public = append(public, publicInfluxConfig(item))
+	}
+	json.NewEncoder(w).Encode(public)
 }
 
 func (s *Server) handleCreateInfluxServer(w http.ResponseWriter, r *http.Request) {
@@ -996,7 +1028,7 @@ func (s *Server) handleCreateInfluxServer(w http.ResponseWriter, r *http.Request
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(newConfig)
+	json.NewEncoder(w).Encode(publicInfluxConfig(newConfig))
 }
 
 func (s *Server) handleUpdateInfluxServer(w http.ResponseWriter, r *http.Request) {
@@ -1048,6 +1080,12 @@ func (s *Server) handleUpdateInfluxServer(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if body.Token == "" {
+		body.Token = existing.Token
+	}
+	if body.Password == "" {
+		body.Password = existing.Password
+	}
 	err = influx.VerifyInfluxDBConnection(body.URL, body.Version, body.Token, body.Username, body.Password, body.Method)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"Connection check failed: %v"}`, err), http.StatusBadRequest)
@@ -1085,7 +1123,7 @@ func (s *Server) handleUpdateInfluxServer(w http.ResponseWriter, r *http.Request
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(updated)
+	json.NewEncoder(w).Encode(publicInfluxConfig(updated))
 }
 
 func (s *Server) handleDeleteInfluxServer(w http.ResponseWriter, r *http.Request) {
@@ -1160,7 +1198,7 @@ func (s *Server) handleActivateInfluxServer(w http.ResponseWriter, r *http.Reque
 	s.config.InfluxBucket = active.Bucket
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(active)
+	json.NewEncoder(w).Encode(publicInfluxConfig(active))
 }
 
 type runDefaultEnvVar struct {
@@ -1272,8 +1310,13 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("failed to get templates: %v", err)})
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
+	visible := make([]*database.K6Template, 0, len(list))
+	for _, t := range list {
+		if s.workspaceAccess(r, t.WorkspaceID, false) {
+			visible = append(visible, t)
+		}
+	}
+	s.writeJSON(w, 200, visible)
 }
 
 func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
@@ -1293,7 +1336,7 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		targetName := strings.ToLower(strings.TrimSpace(newTemplate.Name))
 		for _, t := range existingTemplates {
-			if t != nil && strings.ToLower(strings.TrimSpace(t.Name)) == targetName {
+			if t != nil && workspaceID(t.WorkspaceID) == workspaceID(r.Header.Get("X-Workspace-ID")) && strings.ToLower(strings.TrimSpace(t.Name)) == targetName {
 				http.Error(w, fmt.Sprintf(`{"error":"A template with name '%s' already exists"}`, newTemplate.Name), http.StatusBadRequest)
 				return
 			}
@@ -1301,6 +1344,7 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := fmt.Sprintf("tmpl-%d", time.Now().UnixNano())
+	newTemplate.WorkspaceID = workspaceID(r.Header.Get("X-Workspace-ID"))
 	newTemplate.ID = id
 	newTemplate.CreatedAt = time.Now()
 
@@ -1309,6 +1353,13 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if newTemplate.ScheduleEnabled {
+		subject := s.templateScheduleSubject(newTemplate, r.Header.Get("X-User-Name"))
+		if err := deterministicGuard(subject); err != nil {
+			s.writeError(w, 412, err.Error())
+			return
+		}
+	}
 	if err := s.db.SaveTemplate(newTemplate); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to save template: %v"}`, err), http.StatusInternalServerError)
 		return
@@ -1340,13 +1391,14 @@ func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		targetName := strings.ToLower(strings.TrimSpace(updatedTemplate.Name))
 		for _, t := range existingTemplates {
-			if t != nil && t.ID != id && strings.ToLower(strings.TrimSpace(t.Name)) == targetName {
+			if t != nil && t.ID != id && workspaceID(t.WorkspaceID) == workspaceID(r.Header.Get("X-Workspace-ID")) && strings.ToLower(strings.TrimSpace(t.Name)) == targetName {
 				http.Error(w, fmt.Sprintf(`{"error":"A template with name '%s' already exists"}`, updatedTemplate.Name), http.StatusBadRequest)
 				return
 			}
 		}
 	}
 
+	updatedTemplate.WorkspaceID = workspaceID(r.Header.Get("X-Workspace-ID"))
 	updatedTemplate.ID = id
 	updatedTemplate.CreatedAt = time.Now()
 
@@ -1355,6 +1407,13 @@ func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if updatedTemplate.ScheduleEnabled {
+		subject := s.templateScheduleSubject(updatedTemplate, r.Header.Get("X-User-Name"))
+		if err := deterministicGuard(subject); err != nil {
+			s.writeError(w, 412, err.Error())
+			return
+		}
+	}
 	if err := s.db.SaveTemplate(updatedTemplate); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to update template: %v"}`, err), http.StatusInternalServerError)
 		return
@@ -1432,7 +1491,13 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
+	visible := make([]*database.TestSchedule, 0, len(list))
+	for _, sched := range list {
+		if s.scheduleAccess(r, sched, false) {
+			visible = append(visible, sched)
+		}
+	}
+	json.NewEncoder(w).Encode(visible)
 }
 
 func isRoundHourCron(expr string) bool {
@@ -1454,6 +1519,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sched := body.TestSchedule
+	sched.ID = 0 // The resource ID is assigned by the server, never by a create payload.
 
 	if sched.Name == "" || sched.ClusterID == "" || sched.Namespace == "" || sched.TemplateID == "" {
 		http.Error(w, `{"error":"all fields except cron expression are required"}`, http.StatusBadRequest)
@@ -1544,6 +1610,10 @@ func (s *Server) handleUpdateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.guardianGate(r.Context(), r, s.buildScheduleSubject(&sched, r.Header.Get("X-User-Name")), ""); err != nil {
+		s.writeError(w, 412, err.Error())
+		return
+	}
 	sched.ID = id
 	if err := s.db.SaveSchedule(&sched); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to update schedule: %v"}`, err), http.StatusInternalServerError)
@@ -1632,6 +1702,12 @@ func (s *Server) handleToggleSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sched.Active = !sched.Active
+	if sched.Active {
+		if err := deterministicGuard(s.buildScheduleSubject(sched, r.Header.Get("X-User-Name"))); err != nil {
+			s.writeError(w, 412, err.Error())
+			return
+		}
+	}
 	if err := s.db.SaveSchedule(sched); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"failed to update schedule: %v"}`, err), http.StatusInternalServerError)
 		return
@@ -1648,10 +1724,34 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if !s.unrestrictedAdmin(r) {
+		runs, err := s.influxSvc.ListTestRuns(r.Context())
+		if err != nil {
+			s.writeError(w, 502, "failed to authorize alerts")
+			return
+		}
+		permitted := map[string]bool{}
+		for _, run := range runs {
+			if _, exists := permitted[run.TestRunID]; !exists {
+				permitted[run.TestRunID] = true
+			}
+			permitted[run.TestRunID] = permitted[run.TestRunID] && s.metricRunAllowed(r, run)
+		}
+		visible := make([]*database.TestAlert, 0, len(list))
+		for _, alert := range list {
+			if permitted[alert.TestRunID] {
+				visible = append(visible, alert)
+			}
+		}
+		list = visible
+	}
 	json.NewEncoder(w).Encode(list)
 }
 
 func (s *Server) handleStreamRunMetrics(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeMetricQuery(w, r) {
+		return
+	}
 	runID := r.PathValue("run_id")
 	metric := r.URL.Query().Get("metric")
 	if metric == "" {

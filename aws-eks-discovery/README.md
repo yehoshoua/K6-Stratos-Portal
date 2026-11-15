@@ -87,8 +87,9 @@ Create an IAM Role named **`StratosEKSDiscoveryRole`** (or the name set in `AWS_
 2. **Permission Policy (Permissions):**
    * **File:** [destination-account-permission-policy.json](destination-account-permission-policy.json)
    * **Action:** 
-     * Allows listing all EKS clusters.
-     * **Crucial Rule:** Allows `DescribeCluster` and `ListTagsForResource` **ONLY** when the cluster resource is tagged with `k6s=enabled`. Any other EKS cluster will throw an `AccessDenied` exception.
+     * Allows listing all EKS clusters and describing available EKS addon versions globally.
+     * Allows describing EKS addons.
+     * **Crucial Rule:** Allows `DescribeCluster`, `ListTagsForResource`, and `ListAddons` **ONLY** when the cluster resource is tagged with `k6s=enabled`. Any other EKS cluster will throw an `AccessDenied` exception.
 
 ---
 

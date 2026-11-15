@@ -2,20 +2,23 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "AllowListEKSClustersGlobal",
+      "Sid": "AllowGlobalEKSReadActions",
       "Effect": "Allow",
       "Action": [
-        "eks:ListClusters"
+        "eks:ListClusters",
+        "eks:DescribeAddonVersions",
+        "eks:DescribeAddonConfiguration"
       ],
       "Resource": "*",
-      "Comment": "Permits listing all EKS cluster names across the target region."
+      "Comment": "Permits listing all EKS cluster names and describing available EKS addon versions globally."
     },
     {
       "Sid": "AllowDescribeOnlyTaggedClusters",
       "Effect": "Allow",
       "Action": [
         "eks:DescribeCluster",
-        "eks:ListTagsForResource"
+        "eks:ListTagsForResource",
+        "eks:ListAddons"
       ],
       "Resource": "arn:aws:eks:*:*:cluster/*",
       "Condition": {
@@ -23,7 +26,16 @@
           "aws:ResourceTag/k6s": "enabled"
         }
       },
-      "Comment": "Restricts EKS Describe and ListTags actions strictly to EKS clusters carrying the specific 'k6s=enabled' tag."
+      "Comment": "Restricts EKS Describe, ListTags, and ListAddons actions strictly to EKS clusters carrying the specific 'k6s=enabled' tag."
+    },
+    {
+      "Sid": "AllowDescribeAddons",
+      "Effect": "Allow",
+      "Action": [
+        "eks:DescribeAddon"
+      ],
+      "Resource": "arn:aws:eks:*:*:addon/*",
+      "Comment": "Permits describing EKS addons to retrieve their installed versions."
     }
   ]
 }
