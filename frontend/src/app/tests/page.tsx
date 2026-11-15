@@ -17,6 +17,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Square,
   Terminal,
   Trash2,
   X,
@@ -55,7 +56,13 @@ type ActionMenuState =
       top: number;
       left: number;
     };
-type DeleteTarget = { clusterId: string; name: string; namespace: string };
+type DeleteTarget = {
+  clusterId: string;
+  name: string;
+  namespace: string;
+  resourceKind?: ExecutionViewModel["resourceKind"];
+  action?: "delete" | "stop";
+};
 
 const statusStyles: Record<ExecutionViewModel["state"], string> = {
   running: "border-purple-500/25 bg-purple-500/10 text-purple-300",
@@ -406,7 +413,13 @@ export default function TestsWorkspacePage() {
   const requestDelete = (target: DeleteTarget) => {
     if (!canEdit) return;
     setActionMenu(null);
-    setDeleteTarget(target);
+    setDeleteTarget({ ...target, action: "delete" });
+  };
+
+  const requestStop = (target: DeleteTarget) => {
+    if (!canEdit) return;
+    setActionMenu(null);
+    setDeleteTarget({ ...target, action: "stop" });
   };
 
   const removeResource = async () => {
@@ -417,10 +430,12 @@ export default function TestsWorkspacePage() {
         deleteTarget.clusterId,
         deleteTarget.name,
         deleteTarget.namespace,
+        deleteTarget.resourceKind,
       );
       setSelectedExecution(null);
       setSelectedSchedule(null);
       setDeleteTarget(null);
+      if (deleteTarget.action === "stop") setNotice(copy.stoppedSuccess);
       await loadAll();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : copy.createError);
@@ -737,6 +752,24 @@ export default function TestsWorkspacePage() {
                     )}
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-1">
+                        {canEdit && (item.state === "running" || item.state === "pending") && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              requestStop({
+                                clusterId: item.clusterId,
+                                name: item.name,
+                                namespace: item.namespace,
+                                resourceKind: item.resourceKind,
+                              })
+                            }
+                            className="rounded-lg border border-red-500/30 px-2 py-1.5 text-red-300 hover:bg-red-500/10"
+                            title={copy.stop}
+                            aria-label={copy.stop}
+                          >
+                            <Square className="h-3.5 w-3.5 fill-current" />
+                          </button>
+                        )}
                         <button
                           onClick={() => openExecution(item)}
                           className="rounded-lg border border-slate-800 px-2 py-1.5 text-slate-300 hover:bg-slate-800"
@@ -1203,6 +1236,7 @@ export default function TestsWorkspacePage() {
                         clusterId: actionMenu.item.clusterId,
                         name: actionMenu.item.name,
                         namespace: actionMenu.item.namespace,
+                        resourceKind: actionMenu.item.resourceKind,
                       })
                     }
                     className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-red-300 hover:bg-red-500/10"
@@ -1286,11 +1320,13 @@ export default function TestsWorkspacePage() {
         onClose={() => {
           if (!deleting) setDeleteTarget(null);
         }}
-        title={copy.deleteTitle}
+        title={deleteTarget?.action === "stop" ? copy.stopTitle : copy.deleteTitle}
         subtitle={deleteTarget?.name}
       >
         <div className="space-y-5">
-          <p className="text-sm text-slate-400">{copy.deleteMessage}</p>
+          <p className="text-sm text-slate-400">
+            {deleteTarget?.action === "stop" ? copy.stopMessage : copy.deleteMessage}
+          </p>
           <div className="flex justify-end gap-2">
             <button
               type="button"
@@ -1306,7 +1342,13 @@ export default function TestsWorkspacePage() {
               onClick={removeResource}
               className="rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
             >
-              {deleting ? copy.deleting : copy.delete}
+              {deleting
+                ? deleteTarget?.action === "stop"
+                  ? copy.stopping
+                  : copy.deleting
+                : deleteTarget?.action === "stop"
+                  ? copy.stop
+                  : copy.delete}
             </button>
           </div>
         </div>

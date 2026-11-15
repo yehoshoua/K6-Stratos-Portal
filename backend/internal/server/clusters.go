@@ -26,6 +26,11 @@ func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
 
 	visible := make([]*ClusterConfig, 0, len(list))
 	for _, c := range list {
+		if c.AuthType == "local" {
+			if contextName, err := s.config.Decrypt(c.EncryptedData); err == nil {
+				c.LocalContext = string(contextName)
+			}
+		}
 		s.enrichClusterMetadata(r.Context(), c, true)
 		if c.KubernetesVersion == "" {
 			c.KubernetesVersion = s.queryKubernetesVersion(c.ID)

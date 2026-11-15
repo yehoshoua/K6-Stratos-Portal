@@ -1,104 +1,80 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { HardDrive, ShieldCheck, RefreshCw, Layers, AlertTriangle, CheckCircle } from 'lucide-react';
-import { api, ClusterConfig } from '@/services/api';
+import React, { useCallback, useEffect, useState } from 'react';
+import { HardDrive, RefreshCw, AlertTriangle, CheckCircle } from 'lucide-react';
+import { api, ClusterConfig, ClusterAddonInfo } from '@/services/api';
 import { usePreferences } from '@/components/PreferencesContext';
 
+function isEKS(cluster: ClusterConfig) {
+  return cluster.auth_type === 'eks-assume-role' || /\.eks\.amazonaws\.com(?:\/|$)|\.api\.aws(?:\/|$)|\.amazonwebservices\.com\.cn(?:\/|$)/.test(cluster.api_server_url || '') || cluster.kubernetes_version?.includes('eks');
+}
+
 export default function ClustersPage() {
-  const { t } = usePreferences();
+  const { t, lang } = usePreferences();
   const [clusters, setClusters] = useState<ClusterConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [verifyingMap, setVerifyingMap] = useState<Record<string, 'verifying' | 'connected' | 'failed'>>({});
-  const [clusterAddonsMap, setClusterAddonsMap] = useState<Record<string, { name: string; current: string; recommended: string }[]>>({});
+  const [clusterAddonsMap, setClusterAddonsMap] = useState<Record<string, ClusterAddonInfo[]>>({});
   const [addonsCheckingMap, setAddonsCheckingMap] = useState<Record<string, boolean>>({});
   const [namespacesMap, setNamespacesMap] = useState<Record<string, string[]>>({});
 
-  const fetchClusterAddons = async (clusterId: string) => {
+  const [addonErrors, setAddonErrors] = useState<Record<string, boolean>>({});
+  const [namespaceErrors, setNamespaceErrors] = useState<Record<string, boolean>>({});
+  const [namespacesChecking, setNamespacesChecking] = useState<Record<string, boolean>>({});
+
+  const fetchClusterAddons = useCallback(async (clusterId: string) => {
     setAddonsCheckingMap((prev) => ({ ...prev, [clusterId]: true }));
+    setAddonErrors(prev => ({ ...prev, [clusterId]: false }));
     try {
       const data = await api.getClusterAddons(clusterId);
       setClusterAddonsMap((prev) => ({ ...prev, [clusterId]: data || [] }));
-    } catch (err) {
-      console.error(err);
+      return true;
+    } catch {
+      setAddonErrors(prev => ({ ...prev, [clusterId]: true }));
+      setClusterAddonsMap(prev => ({ ...prev, [clusterId]: [] }));
+      return false;
     } finally {
       setAddonsCheckingMap((prev) => ({ ...prev, [clusterId]: false }));
     }
-  };
-
-  const fetchNamespaces = async (clusterId: string) => {
-    try {
-      const nsList = await api.getNamespaces(clusterId);
-      setNamespacesMap((prev) => ({ ...prev, [clusterId]: nsList || [] }));
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const loadClusters = async () => {
-    try {
-      setLoading(true);
-      const data = await api.getClusters();
-      const safeData = data || [];
-      setClusters(safeData);
-      // Initialize validation statuses
-      const statusMap: Record<string, any> = {};
-      safeData.forEach(c => {
-        statusMap[c.id] = 'connected';
-        fetchNamespaces(c.id);
-        const isEKS = c.api_server_url?.includes('.eks.amazonaws.com') || c.kubernetes_version?.includes('eks') || c.name?.toLowerCase().includes('eks');
-        if (isEKS) {
-          fetchClusterAddons(c.id);
-        }
-      });
-      setVerifyingMap(statusMap);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadClusters();
   }, []);
 
-  const handleVerify = async (id: string) => {
-    setVerifyingMap(prev => ({ ...prev, [id]: 'verifying' }));
-    
-    // Asynchronously update namespaces and addons
-    await fetchNamespaces(id);
-    const c = clusters.find(item => item.id === id);
-    const isEKS = c?.api_server_url?.includes('.eks.amazonaws.com') || c?.kubernetes_version?.includes('eks') || c?.name?.toLowerCase().includes('eks');
-    if (isEKS) {
-      await fetchClusterAddons(id);
-    } else {
-      await new Promise(resolve => setTimeout(resolve, 800));
-    }
-    
-    setVerifyingMap(prev => ({ ...prev, [id]: 'connected' }));
-  };
-
-  const [upgradingAddonsMap, setUpgradingAddonsMap] = useState<Record<string, boolean>>({});
-  const [upgradeErrorMap, setUpgradeErrorMap] = useState<Record<string, string>>({});
-
-  const handleUpgradeAddon = async (clusterId: string, addonName: string, recommendedVersion: string) => {
-    const key = `${clusterId}:${addonName}`;
-    setUpgradingAddonsMap(prev => ({ ...prev, [key]: true }));
-    setUpgradeErrorMap(prev => ({ ...prev, [key]: '' }));
+  const fetchNamespaces = useCallback(async (clusterId: string) => {
+    setNamespacesChecking(prev => ({ ...prev, [clusterId]: true }));
+    setNamespaceErrors(prev => ({ ...prev, [clusterId]: false }));
     try {
-      await api.upgradeClusterAddon(clusterId, addonName, recommendedVersion);
-      setTimeout(() => {
-        fetchClusterAddons(clusterId);
-      }, 3000);
-    } catch (err) {
-      console.error(err);
-      const msg = err instanceof Error ? err.message : 'Upgrade failed';
-      setUpgradeErrorMap(prev => ({ ...prev, [key]: msg }));
+      const nsList = await api.getNamespaces(clusterId);
+      setNamespacesMap(prev => ({ ...prev, [clusterId]: nsList || [] }));
+      return true;
+    } catch {
+      setNamespaceErrors(prev => ({ ...prev, [clusterId]: true }));
+      setNamespacesMap(prev => ({ ...prev, [clusterId]: [] }));
+      return false;
     } finally {
-      setUpgradingAddonsMap(prev => ({ ...prev, [key]: false }));
+      setNamespacesChecking(prev => ({ ...prev, [clusterId]: false }));
     }
-  };
+  }, []);
+
+  const verifyCluster = useCallback(async (cluster: ClusterConfig) => {
+    setVerifyingMap(prev => ({ ...prev, [cluster.id]: 'verifying' }));
+    const results = await Promise.all([
+      fetchNamespaces(cluster.id),
+      ...(isEKS(cluster) ? [fetchClusterAddons(cluster.id)] : []),
+    ]);
+    setVerifyingMap(prev => ({ ...prev, [cluster.id]: results.every(Boolean) ? 'connected' : 'failed' }));
+  }, [fetchNamespaces, fetchClusterAddons]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getClusters().then(data => {
+      if (cancelled) return;
+      const safeData = data || [];
+      setClusters(safeData);
+      safeData.forEach(c => { void verifyCluster(c); });
+    }).catch(console.error).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [verifyCluster]);
 
   return (
     <div className="space-y-8 animate-fadeIn">
@@ -157,7 +133,7 @@ export default function ClustersPage() {
               <div className="grid grid-cols-2 gap-4 bg-slate-950/40 p-4 rounded-2xl border border-slate-900">
                 <div className="space-y-1">
                   <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">{t('k8sVersion')}</span>
-                  <p className="text-xs font-semibold text-slate-300">{cluster.kubernetes_version || 'v1.35.0-eks'}</p>
+                  <p className="text-xs font-semibold text-slate-300">{cluster.kubernetes_version || t('clusterUnknownVersion')}</p>
                 </div>
                 <div className="space-y-1">
                   <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">{t('awsRegion')}</span>
@@ -174,14 +150,18 @@ export default function ClustersPage() {
                 <div className="space-y-1 col-span-2">
                   <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">{t('registeredOn')}</span>
                   <p className="text-xs font-semibold text-slate-300">
-                    {new Date(cluster.created_at || Date.now()).toLocaleDateString()}
+                    {cluster.created_at ? new Date(cluster.created_at).toLocaleDateString(lang) : '—'}
                   </p>
                 </div>
                 <div className="space-y-1 col-span-2 border-t border-slate-905/30 pt-3">
-                  <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Allowed Namespaces (k6s)</span>
+                  <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">{t('clusterAllowedNamespaces')}</span>
                   <div className="flex flex-wrap gap-1.5 mt-1">
-                    {(namespacesMap[cluster.id] || []).length === 0 ? (
-                      <span className="text-xs text-slate-500 italic">None detected</span>
+                    {namespacesChecking[cluster.id] ? (
+                      <span className="text-xs text-slate-500">{t('checking')}</span>
+                    ) : namespaceErrors[cluster.id] ? (
+                      <span role="alert" className="text-xs text-amber-400">{t('clusterNamespaceError')}</span>
+                    ) : (namespacesMap[cluster.id] || []).length === 0 ? (
+                      <span className="text-xs text-slate-500 italic">{t('clusterNoNamespaces')}</span>
                     ) : (
                       (namespacesMap[cluster.id] || []).map(ns => (
                         <span key={ns} className="px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px] font-mono">
@@ -193,78 +173,42 @@ export default function ClustersPage() {
                 </div>
               </div>
 
-              {/* EKS Addon Update Recommendations */}
-              {(() => {
-                const isEKS = cluster.api_server_url?.includes('.eks.amazonaws.com') || cluster.kubernetes_version?.includes('eks') || cluster.name?.toLowerCase().includes('eks');
-                if (!isEKS) return null;
-                const checking = addonsCheckingMap[cluster.id];
+              {isEKS(cluster) && (() => {
                 const addons = clusterAddonsMap[cluster.id] || [];
+                const checking = addonsCheckingMap[cluster.id];
+                const failed = addonErrors[cluster.id];
                 const pendingUpdates = addons.filter(addon => addon.current !== addon.recommended);
-
-                if (checking) {
-                  return (
-                    <div className="p-4 bg-amber-500/5 border border-amber-500/15 rounded-2xl space-y-2.5 transition duration-300">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
-                          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 animate-bounce" />
-                          <span>{t('eksAddonUpdatesRecommended') || 'EKS Add-on Updates Recommended'}</span>
-                        </div>
-                        <span className="inline-flex items-center gap-1 text-[9px] font-semibold text-amber-500/80 uppercase tracking-wider animate-pulse">
-                          <RefreshCw className="w-2.5 h-2.5 animate-spin" />
-                          {t('checking') || 'Checking...'}
-                        </span>
-                      </div>
-                      <div className="space-y-2 py-1 pl-6">
-                        <div className="h-2 w-3/4 bg-amber-500/20 rounded-full animate-pulse"></div>
-                        <div className="h-2 w-1/2 bg-amber-500/20 rounded-full animate-pulse"></div>
-                      </div>
+                const healthy = addons.length > 0 && addons.every(addon => addon.status === 'ACTIVE');
+                const upToDate = !checking && !failed && healthy && pendingUpdates.length === 0;
+                const message = checking ? 'checking' : failed ? 'clusterAddonError' : addons.length === 0 ? 'clusterNoAddons' : !healthy ? 'clusterAddonNotActive' : pendingUpdates.length > 0 ? 'eksAddonUpdatesRecommended' : 'allAddonsUpToDate';
+                return (
+                  <div className={`p-4 border rounded-2xl space-y-3 text-xs ${upToDate ? 'bg-emerald-500/5 border-emerald-500/15 text-emerald-400' : 'bg-amber-500/5 border-amber-500/15 text-amber-400'}`}>
+                    <div role={failed ? 'alert' : 'status'} className="flex items-center gap-2 font-semibold">
+                      {checking ? <RefreshCw className="w-4 h-4 animate-spin" /> : upToDate ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
+                      <span>{t(message)}</span>
                     </div>
-                  );
-                }
-
-                if (addons.length > 0 && pendingUpdates.length === 0) {
-                  return (
-                    <div className="p-4 bg-emerald-500/5 border border-emerald-500/15 rounded-2xl flex items-center gap-2.5 text-emerald-400 text-xs font-semibold transition duration-300">
-                      <CheckCircle className="w-4 h-4 shrink-0 text-emerald-400" />
-                      <span>{t('allAddonsUpToDate') || 'All EKS Add-ons are up to date'}</span>
-                    </div>
-                  );
-                }
-
-                if (pendingUpdates.length > 0) {
-                  return (
-                    <div className="p-4 bg-amber-500/5 border border-amber-500/15 rounded-2xl space-y-2.5 transition duration-300">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
-                          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
-                          <span>{t('eksAddonUpdatesRecommended') || 'EKS Add-on Updates Recommended'}</span>
-                        </div>
-                        <span className="text-[9px] font-semibold text-emerald-500 bg-emerald-500/10 border border-emerald-500/25 px-1.5 py-0.5 rounded-full uppercase tracking-wider">
-                          {t('verified') || 'Verified'}
-                        </span>
-                      </div>
-                      
-                      <div className="space-y-1.5 pl-6 text-[10px] text-slate-400 font-sans">
-                        {pendingUpdates.map((addon) => (
-                          <div key={addon.name} className="flex justify-between items-center gap-4 py-1 border-b border-amber-500/10 last:border-0">
+                    {!checking && !failed && pendingUpdates.length > 0 && (
+                      <div className="space-y-2 text-slate-400">
+                        <p>{t('clusterAddonVersions')}</p>
+                        {pendingUpdates.map(addon => (
+                          <div key={addon.name} className="flex flex-wrap justify-between gap-2 border-t border-slate-700/20 pt-2">
                             <span className="font-mono text-slate-300">{addon.name}</span>
-                            <span className="font-mono text-[9px] text-slate-500">
-                              {addon.current} → <span className="text-amber-400 font-semibold">{addon.recommended}</span>
+                            <span className="font-mono text-[10px]">
+                              {addon.current} → <span className={addon.current !== addon.recommended ? 'text-amber-400 font-semibold' : ''}>{addon.recommended}</span>
+                              {addon.status !== 'ACTIVE' && <span className="ms-2 text-amber-400">({addon.status})</span>}
                             </span>
                           </div>
                         ))}
                       </div>
-                    </div>
-                  );
-                }
-
-                return null;
+                    )}
+                  </div>
+                );
               })()}
 
               {/* Actions */}
               <div className="flex space-x-3 pt-2">
                 <button
-                  onClick={() => handleVerify(cluster.id)}
+                  onClick={() => verifyCluster(cluster)}
                   disabled={verifyingMap[cluster.id] === 'verifying'}
                   className="flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-xl border border-slate-800 hover:border-slate-700 bg-slate-900/40 hover:bg-slate-800/40 text-slate-300 hover:text-slate-100 transition duration-300 text-xs font-semibold cursor-pointer disabled:opacity-50"
                 >

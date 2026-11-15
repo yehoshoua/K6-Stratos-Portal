@@ -1,3 +1,10 @@
+export interface ClusterAddonInfo {
+  name: string;
+  current: string;
+  recommended: string;
+  status: string;
+}
+
 const BASE_URL = '/api';
 
 async function apiFetch(url: string, options: RequestInit = {}): Promise<Response> {
@@ -29,6 +36,7 @@ function getHeaders(): HeadersInit {
 }
 
 export interface ClusterConfig {
+  local_context?: string;
   id: string;
   name: string;
   api_server_url: string;
@@ -372,13 +380,20 @@ export const api = {
 
   async getNamespaces(clusterId: string): Promise<string[]> {
     const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/namespaces`, { headers: getHeaders() });
-    if (!res.ok) return [];
+    if (!res.ok) throw new Error('Namespace discovery failed');
     return res.json();
   },
 
-  async getClusterAddons(clusterId: string): Promise<{ name: string; current: string; recommended: string }[]> {
+  async getServiceAccounts(clusterId: string, namespace: string): Promise<string[]> {
+    const params = new URLSearchParams({ namespace });
+    const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/service-accounts?${params.toString()}`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Service account discovery failed');
+    return res.json();
+  },
+
+  async getClusterAddons(clusterId: string): Promise<ClusterAddonInfo[]> {
     const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/addons`, { headers: getHeaders() });
-    if (!res.ok) return [];
+    if (!res.ok) throw new Error('Add-on check failed');
     return res.json();
   },
 
@@ -628,8 +643,10 @@ export const api = {
     return res.json();
   },
 
-  async deleteCRD(clusterId: string, name: string, namespace = 'default'): Promise<void> {
-    const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/crds/${name}?namespace=${namespace}`, {
+  async deleteCRD(clusterId: string, name: string, namespace = 'default', kind?: 'TestRun' | 'Job'): Promise<void> {
+    const params = new URLSearchParams({ namespace });
+    if (kind) params.set('kind', kind);
+    const res = await apiFetch(`${BASE_URL}/k8s/clusters/${clusterId}/crds/${name}?${params.toString()}`, {
       method: 'DELETE',
       headers: getHeaders(),
     });

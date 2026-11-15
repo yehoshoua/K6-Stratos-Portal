@@ -91,9 +91,9 @@ func GetLocalContexts() ([]LocalContextInfo, string, error) {
 	return list, config.CurrentContext, nil
 }
 
-// NewClientFromLocalKubeconfig initializes EKSClusterClient from the local kubeconfig file
-// using a specified context name (or current-context if contextName is empty).
-func NewClientFromLocalKubeconfig(contextName string) (*EKSClusterClient, error) {
+// LocalRESTConfig loads the registered context, including its AWS exec identity.
+// An empty contextName uses the current context.
+func LocalRESTConfig(contextName string) (*rest.Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user home directory: %w", err)
@@ -129,6 +129,15 @@ func NewClientFromLocalKubeconfig(contextName string) (*EKSClusterClient, error)
 	}
 
 	config.Timeout = 5 * time.Second
+
+	return config, nil
+}
+
+func NewClientFromLocalKubeconfig(contextName string) (*EKSClusterClient, error) {
+	config, err := LocalRESTConfig(contextName)
+	if err != nil {
+		return nil, err
+	}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {

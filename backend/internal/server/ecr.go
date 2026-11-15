@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"k6-bedrock-dashboard/backend/internal/discovery"
+	"k6-bedrock-dashboard/backend/internal/k8s"
 )
 
 type ecrCheckResponse struct {
@@ -160,6 +161,16 @@ func (s *Server) awsAccountIDFromEKSCluster(ctx context.Context, c *ClusterConfi
 	var err error
 
 	switch c.AuthType {
+	case "local":
+		client, name, err := s.addonClient(ctx, c)
+		if err != nil {
+			return ""
+		}
+		out, err := client.DescribeCluster(ctx, &eks.DescribeClusterInput{Name: aws.String(name)})
+		if err != nil || out.Cluster == nil || !strings.EqualFold(strings.TrimRight(aws.ToString(out.Cluster.Endpoint), "/"), strings.TrimRight(c.APIServerURL, "/")) {
+			return ""
+		}
+		return accountIDFromARN(aws.ToString(out.Cluster.Arn))
 	case "eks-assume-role":
 		if c.EncryptedData == "" {
 			return ""
@@ -260,6 +271,24 @@ func (s *Server) enrichClusterMetadata(ctx context.Context, c *ClusterConfig, pe
 	if c.Region == "" {
 		c.Region = parseRegion(c.APIServerURL)
 	}
+	if c.AuthType == "local" {
+		var inferredAccount string
+		if contextName, err := s.config.Decrypt(c.EncryptedData); err == nil {
+			if contexts, _, err := k8s.GetLocalContexts(); err == nil {
+				inferredAccount = localContextAccountID(string(contextName), c.APIServerURL, contexts)
+			}
+		}
+		if inferredAccount == "" && isAmazonEKSAPIEndpoint(c.APIServerURL) {
+			inferredAccount = s.awsAccountIDFromEKSCluster(ctx, c)
+		}
+		if inferredAccount != "" && inferredAccount != c.AWSAccountID {
+			c.AWSAccountID = inferredAccount
+			if persist && s.db != nil {
+				_ = s.db.SaveCluster(c)
+			}
+		}
+		return
+	}
 
 	portalAccount := s.portalAWSAccountID(ctx)
 	isEKSEndpoint := strings.Contains(c.APIServerURL, ".eks.amazonaws.com")
@@ -290,4 +319,19 @@ func (s *Server) enrichClusterMetadata(ctx context.Context, c *ClusterConfig, pe
 	if persist && s.db != nil {
 		_ = s.db.SaveCluster(c)
 	}
+}
+
+// Resolve the registered context, including aliases, without using the portal's
+// default AWS identity or the kubeconfig's unrelated current context.
+func localContextAccountID(contextName, endpoint string, contexts []k8s.LocalContextInfo) string {
+	for _, c := range contexts {
+		if c.ContextName != contextName || !strings.EqualFold(strings.TrimRight(c.APIServerURL, "/"), strings.TrimRight(endpoint, "/")) {
+			continue
+		}
+		if account := accountIDFromARN(c.ClusterName); account != "" {
+			return account
+		}
+		return accountIDFromARN(c.ContextName)
+	}
+	return ""
 }

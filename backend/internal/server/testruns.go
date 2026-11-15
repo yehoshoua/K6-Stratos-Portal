@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -410,9 +411,13 @@ func (s *Server) handleCreateCRD(w http.ResponseWriter, r *http.Request) {
 	}
 
 	image := "grafana/k6:latest"
+	serviceAccountName := ""
 	var limits corev1.ResourceList
 	if specMap != nil {
 		if runnerMap, ok := specMap["runner"].(map[string]interface{}); ok {
+			if value, ok := runnerMap["serviceAccountName"].(string); ok {
+				serviceAccountName = strings.TrimSpace(value)
+			}
 			if specRunnerImage, ok := runnerMap["image"].(string); ok && specRunnerImage != "" {
 				resolvedImage := resolveClusterImage(specRunnerImage, clusterConfig)
 				image = resolvedImage
@@ -524,7 +529,8 @@ func (s *Server) handleCreateCRD(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 			Spec: corev1.PodSpec{
-				RestartPolicy: corev1.RestartPolicyNever,
+				RestartPolicy:      corev1.RestartPolicyNever,
+				ServiceAccountName: serviceAccountName,
 				Containers: []corev1.Container{
 					{
 						Name:      "k6-runner",
@@ -737,6 +743,27 @@ func (s *Server) handleDeleteCRD(w http.ResponseWriter, r *http.Request) {
 	s.audit("testrun.delete", r.Header.Get("X-User-Name"), fmt.Sprintf("%s/%s/%s", id, namespace, name), nil)
 
 	if isMock {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true}`))
+		return
+	}
+
+	// Honor an explicit resource kind so stopping a TestRun removes the CRD
+	// itself instead of only deleting a same-named runner Job.
+	switch r.URL.Query().Get("kind") {
+	case "TestRun":
+		if err := client.DeleteK6CustomResource(r.Context(), namespace, name); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true}`))
+		return
+	case "Job":
+		if err := client.Clientset.BatchV1().Jobs(namespace).Delete(r.Context(), name, metav1.DeleteOptions{}); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"success":true}`))
 		return
@@ -1474,25 +1501,69 @@ func (s *Server) handleListNamespaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nsList, err := client.Clientset.CoreV1().Namespaces().List(r.Context(), metav1.ListOptions{
-		LabelSelector: namespaceLabelSelector(clusterConfig),
-	})
-	if err != nil {
-		if isEKS {
-			// Never expose an unverified namespace on EKS when discovery fails.
-			json.NewEncoder(w).Encode([]string{})
+	// Keep the canonical label and accept the legacy transposed spelling.
+	// Kubernetes selectors cannot OR different keys, so merge two scoped lists.
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	names := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, selector := range []string{namespaceLabelSelector(clusterConfig), "ks6=enabled"} {
+		nsList, err := client.Clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			s.writeError(w, http.StatusBadGateway, "namespace discovery failed: "+err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode([]string{})
+		for _, ns := range nsList.Items {
+			if !seen[ns.Name] {
+				names = append(names, ns.Name)
+				seen[ns.Name] = true
+			}
+		}
+	}
+	sort.Strings(names)
+
+	json.NewEncoder(w).Encode(s.filterNamespaceNames(r, id, names))
+}
+
+func (s *Server) handleListServiceAccounts(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	namespace := strings.TrimSpace(r.URL.Query().Get("namespace"))
+	if namespace == "" {
+		namespace = "default"
+	}
+	if namespace == "all" {
+		s.writeError(w, http.StatusBadRequest, "a single namespace is required")
+		return
+	}
+	if _, err := s.requestNamespaces(r, id); err != nil {
+		s.writeError(w, http.StatusForbidden, "namespace access denied")
 		return
 	}
 
-	names := make([]string, 0)
-	for _, ns := range nsList.Items {
-		names = append(names, ns.Name)
+	client, isMock, err := s.getClusterClient(id)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
-	json.NewEncoder(w).Encode(s.filterNamespaceNames(r, id, names))
+	accounts := []string{}
+	if isMock {
+		accounts = []string{"default", "k6-runner"}
+	} else {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		list, err := client.Clientset.CoreV1().ServiceAccounts(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			s.writeError(w, http.StatusBadGateway, "failed to list service accounts")
+			return
+		}
+		for _, account := range list.Items {
+			accounts = append(accounts, account.Name)
+		}
+	}
+	sort.Strings(accounts)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(accounts)
 }
 
 func (s *Server) handleGetOperatorStatus(w http.ResponseWriter, r *http.Request) {
@@ -1850,102 +1921,6 @@ func (s *Server) handleGetPodLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type ClusterAddonInfo struct {
-	Name        string `json:"name"`
-	Current     string `json:"current"`
-	Recommended string `json:"recommended"`
-}
-
-func (s *Server) handleGetClusterAddons(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	client, isMock, err := s.getClusterClient(id)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"failed to connect to cluster: %v"}`, err), http.StatusInternalServerError)
-		return
-	}
-
-	var addons []ClusterAddonInfo
-
-	// Fetch kubernetes version first
-	k8sVersion := s.queryKubernetesVersion(id)
-
-	if isMock {
-		addons = computeRecommendedAddons(k8sVersion)
-	} else {
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-
-		// 1. Check vpc-cni (daemonset aws-node in kube-system)
-		vpcCNIVersion := "unknown"
-		ds, err := client.Clientset.AppsV1().DaemonSets("kube-system").Get(ctx, "aws-node", metav1.GetOptions{})
-		if err == nil && len(ds.Spec.Template.Spec.Containers) > 0 {
-			vpcCNIVersion = extractVersionFromImage(ds.Spec.Template.Spec.Containers[0].Image)
-		}
-
-		// 2. Check external-dns (deployment external-dns in kube-system or external-dns)
-		externalDNSVersion := "unknown"
-		depExt, errExt := client.Clientset.AppsV1().Deployments("kube-system").Get(ctx, "external-dns", metav1.GetOptions{})
-		if errExt != nil {
-			depExt, errExt = client.Clientset.AppsV1().Deployments("external-dns").Get(ctx, "external-dns", metav1.GetOptions{})
-		}
-		if errExt == nil && len(depExt.Spec.Template.Spec.Containers) > 0 {
-			externalDNSVersion = extractVersionFromImage(depExt.Spec.Template.Spec.Containers[0].Image)
-		}
-
-		// 3. Check aws-ebs-csi-driver (deployment ebs-csi-controller in kube-system)
-		ebsCSIVersion := "unknown"
-		depEBS, errEBS := client.Clientset.AppsV1().Deployments("kube-system").Get(ctx, "ebs-csi-controller", metav1.GetOptions{})
-		if errEBS == nil && len(depEBS.Spec.Template.Spec.Containers) > 0 {
-			ebsCSIVersion = extractVersionFromImage(depEBS.Spec.Template.Spec.Containers[0].Image)
-		}
-
-		// 4. Check kube-proxy (daemonset kube-proxy in kube-system)
-		kubeProxyVersion := "unknown"
-		kp, err := client.Clientset.AppsV1().DaemonSets("kube-system").Get(ctx, "kube-proxy", metav1.GetOptions{})
-		if err == nil && len(kp.Spec.Template.Spec.Containers) > 0 {
-			kubeProxyVersion = extractVersionFromImage(kp.Spec.Template.Spec.Containers[0].Image)
-		}
-
-		// 5. Check metrics-server (deployment metrics-server in kube-system)
-		metricsServerVersion := "unknown"
-		depMS, errMS := client.Clientset.AppsV1().Deployments("kube-system").Get(ctx, "metrics-server", metav1.GetOptions{})
-		if errMS == nil && len(depMS.Spec.Template.Spec.Containers) > 0 {
-			metricsServerVersion = extractVersionFromImage(depMS.Spec.Template.Spec.Containers[0].Image)
-		}
-
-		// Build recommended versions dynamically
-		recommended := computeRecommendedAddons(k8sVersion)
-		for _, rAddon := range recommended {
-			currentVal := rAddon.Current
-			if rAddon.Name == "vpc-cni" && vpcCNIVersion != "unknown" {
-				currentVal = vpcCNIVersion
-			} else if rAddon.Name == "external-dns" && externalDNSVersion != "unknown" {
-				currentVal = externalDNSVersion
-			} else if rAddon.Name == "aws-ebs-csi-driver" && ebsCSIVersion != "unknown" {
-				currentVal = ebsCSIVersion
-			} else if rAddon.Name == "kube-proxy" && kubeProxyVersion != "unknown" {
-				currentVal = kubeProxyVersion
-			} else if rAddon.Name == "metrics-server" && metricsServerVersion != "unknown" {
-				currentVal = metricsServerVersion
-			}
-
-			recommendedVal := rAddon.Recommended
-			if isNewerOrEqual(currentVal, recommendedVal) {
-				recommendedVal = currentVal
-			}
-
-			addons = append(addons, ClusterAddonInfo{
-				Name:        rAddon.Name,
-				Current:     currentVal,
-				Recommended: recommendedVal,
-			})
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(addons)
-}
-
 func (s *Server) handleUpgradeClusterAddon(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	addonName := r.PathValue("addon_name")
@@ -2047,24 +2022,6 @@ func extractVersionFromImage(image string) string {
 	}
 	tag := parts[len(parts)-1]
 	return tag
-}
-
-func computeRecommendedAddons(k8sVersion string) []ClusterAddonInfo {
-	version := strings.ToLower(k8sVersion)
-	if !strings.HasPrefix(version, "v") && version != "" {
-		version = "v" + version
-	}
-	if version == "" {
-		version = "v1.35.0-eks"
-	}
-
-	return []ClusterAddonInfo{
-		{Name: "vpc-cni", Current: "v1.23.0-eksbuild.1", Recommended: "v1.23.0-eksbuild.1"},
-		{Name: "external-dns", Current: "v0.14.2-eksbuild.1", Recommended: "v0.15.0-eksbuild.1"},
-		{Name: "aws-ebs-csi-driver", Current: "v1.34.0-eksbuild.1", Recommended: "v1.35.0-eksbuild.1"},
-		{Name: "kube-proxy", Current: "v1.32.0-eksbuild.1", Recommended: "v1.33.0-eksbuild.1"},
-		{Name: "metrics-server", Current: "v0.7.1-eksbuild.1", Recommended: "v0.7.2-eksbuild.1"},
-	}
 }
 
 func isNewerOrEqual(current, recommended string) bool {

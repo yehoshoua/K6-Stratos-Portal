@@ -225,6 +225,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/k8s/clusters/{id}", s.authMiddleware(s.adminOnly(s.handleUpdateCluster)))
 	mux.HandleFunc("DELETE /api/k8s/clusters/{id}", s.authMiddleware(s.adminOnly(s.handleDeleteCluster)))
 	mux.HandleFunc("GET /api/k8s/clusters/{id}/namespaces", s.authMiddleware(s.handleListNamespaces))
+	mux.HandleFunc("GET /api/k8s/clusters/{id}/service-accounts", s.authMiddleware(s.handleListServiceAccounts))
 	mux.HandleFunc("GET /api/k8s/clusters/{id}/addons", s.authMiddleware(s.handleGetClusterAddons))
 	mux.HandleFunc("POST /api/k8s/clusters/{id}/addons/{addon_name}/upgrade", s.authMiddleware(s.adminOnly(s.handleUpgradeClusterAddon)))
 

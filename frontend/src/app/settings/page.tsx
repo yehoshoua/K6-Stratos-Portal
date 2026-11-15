@@ -29,6 +29,7 @@ import { RUNNER_IMAGE_PLACEHOLDER } from '@/utils/clusterImage';
 import { usePreferences, ColorPalette, Language, Theme, CustomPalette, defaultPalettes } from '@/components/PreferencesContext';
 import PaletteEditorModal from '@/components/PaletteEditorModal';
 import K6ScriptEditor from '@/components/K6ScriptEditor';
+import LocalContextPicker, { localClusterName, sortLocalContexts } from '@/components/LocalContextPicker';
 import { scriptHasStages } from '@/utils/k6ScriptStages';
 
 type SettingsTab = 'kubernetes' | 'influxdb' | 'templates' | 'security' | 'users' | 'workspaces' | 'appearance';
@@ -131,28 +132,26 @@ export default function SettingsPage() {
     try {
       setLoadingContexts(true);
       const data = await api.getLocalContexts();
-      const contexts = data.contexts || [];
+      const contexts = sortLocalContexts(data.contexts || []);
       setLocalContexts(contexts);
       
-      if (data.current_context) {
-        const current = contexts.find(c => c.context_name === data.current_context);
-        if (current) {
-          setNewCluster(prev => ({
-            ...prev,
-            raw_secret: current.context_name,
-            api_server_url: current.api_server_url,
-            name: prev.name || (current.context_name.split('/').pop() || t('defaultK8sCluster'))
-          }));
-        }
-      } else if (contexts.length > 0) {
-        const first = contexts[0];
-        setNewCluster(prev => ({
+      setNewCluster(prev => {
+        if (prev.auth_type !== 'local') return prev;
+        const saved = isEditing ? clusters.find(cluster => cluster.id === editingClusterId) : undefined;
+        const selectedContext = prev.raw_secret || saved?.local_context;
+        const selected = selectedContext
+          ? contexts.find(context => context.context_name === selectedContext)
+          : isEditing
+            ? contexts.find(context => context.api_server_url === prev.api_server_url)
+            : contexts.find(context => context.context_name === data.current_context) || contexts[0];
+        if (!selected) return prev;
+        return {
           ...prev,
-          raw_secret: first.context_name,
-          api_server_url: first.api_server_url,
-          name: prev.name || (first.context_name.split('/').pop() || t('defaultK8sCluster'))
-        }));
-      }
+          raw_secret: selected.context_name,
+          api_server_url: selected.api_server_url,
+          name: prev.name || localClusterName(selected),
+        };
+      });
     } catch (err) {
       console.error('Failed to load local contexts', err);
     } finally {
@@ -1391,6 +1390,7 @@ export default function () {
       const namespacesStr = allowedNamespaces.filter(Boolean).join(',');
       const payload = {
         ...newCluster,
+        aws_account_id: newCluster.auth_type === 'local' ? '' : newCluster.aws_account_id,
         namespaces: namespacesStr
       };
 
@@ -2789,6 +2789,7 @@ export default function () {
                 </div>
               )}
 
+              {newCluster.auth_type !== 'local' && (
               <div>
                 <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('awsAccountId')}</label>
                 <input
@@ -2802,6 +2803,8 @@ export default function () {
                 />
                 <p className="text-[10px] text-slate-600 mt-1">{t('awsAccountIdDesc')}</p>
               </div>
+
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className={newCluster.auth_type === 'local' || newCluster.auth_type === 'in-cluster' ? "col-span-2" : ""}>
@@ -2839,7 +2842,6 @@ export default function () {
                 </div>
               ) : newCluster.auth_type === 'local' ? (
                 <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">{t('localKubeconfigContext')}</label>
                   {loadingContexts ? (
                     <div className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-500">
                       {t('loading')}
@@ -2849,27 +2851,19 @@ export default function () {
                       {t('connectionFailed')}
                     </div>
                   ) : (
-                    <select
+                    <LocalContextPicker
+                      contexts={localContexts}
                       value={newCluster.raw_secret}
-                      onChange={(e) => {
-                        const ctxName = e.target.value;
-                        const matched = localContexts.find(c => c.context_name === ctxName);
-                        setNewCluster({
-                          ...newCluster,
-                          raw_secret: ctxName,
-                          api_server_url: matched ? matched.api_server_url : newCluster.api_server_url,
-                          name: newCluster.name || (ctxName.split('/').pop() || t('defaultK8sCluster'))
-                        });
-                      }}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-sm text-slate-200 focus:border-purple-500 outline-none"
-                    >
-                      <option value="">{t('localKubeconfigContext')}</option>
-                      {localContexts.map((ctx) => (
-                        <option key={ctx.context_name} value={ctx.context_name}>
-                          {ctx.context_name} {ctx.is_current ? ` (${t('active')})` : ''}
-                        </option>
-                      ))}
-                    </select>
+                      required={!isEditing}
+                      onChange={context => setNewCluster(prev => ({
+                        ...prev,
+                        raw_secret: context?.context_name || '',
+                        api_server_url: context?.api_server_url || prev.api_server_url,
+                        name: !prev.name || localContexts.some(item => localClusterName(item) === prev.name)
+                          ? (context ? localClusterName(context) : '')
+                          : prev.name,
+                      }))}
+                    />
                   )}
                 </div>
               ) : (

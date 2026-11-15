@@ -203,6 +203,9 @@ export default function K6TestWizard({
   const [clusters, setClusters] = useState<ClusterConfig[]>([]);
   const [templates, setTemplates] = useState<K6Template[]>([]);
   const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [serviceAccounts, setServiceAccounts] = useState<string[]>([]);
+  const [serviceAccountsLoading, setServiceAccountsLoading] = useState(false);
+  const [serviceAccountsError, setServiceAccountsError] = useState(false);
   const [defaults, setDefaults] = useState<RunDefaults>({
     output_args: "",
     use_output: false,
@@ -213,6 +216,7 @@ export default function K6TestWizard({
   const [templateId, setTemplateId] = useState("");
   const [clusterId, setClusterId] = useState("");
   const [namespace, setNamespace] = useState("");
+  const [serviceAccount, setServiceAccount] = useState("");
   const [name, setName] = useState("");
   const [script, setScript] = useState(FALLBACK_SCRIPT);
   const [parallelism, setParallelism] = useState(1);
@@ -291,6 +295,8 @@ export default function K6TestWizard({
       setClusterId("");
       setNamespace("");
       setNamespaces([]);
+      setServiceAccount("");
+      setServiceAccounts([]);
       allowAutoTemplateRef.current = true;
       return;
     }
@@ -322,6 +328,8 @@ export default function K6TestWizard({
       setClusterId("");
       setNamespace("");
       setNamespaces([]);
+      setServiceAccount("");
+      setServiceAccounts([]);
       setLoading(true);
       Promise.all([
         api.getClusters(),
@@ -383,6 +391,36 @@ export default function K6TestWizard({
         setNamespace("");
       });
   }, [clusterId, open]);
+
+  useEffect(() => {
+    if (!clusterId || !namespace || !open) {
+      setServiceAccounts([]);
+      setServiceAccountsLoading(false);
+      setServiceAccountsError(false);
+      return;
+    }
+    let active = true;
+    setServiceAccountsLoading(true);
+    setServiceAccountsError(false);
+    setServiceAccounts([]);
+    api
+      .getServiceAccounts(clusterId, namespace)
+      .then((items) => {
+        if (active) setServiceAccounts(items || []);
+      })
+      .catch(() => {
+        if (active) {
+          setServiceAccounts([]);
+          setServiceAccountsError(true);
+        }
+      })
+      .finally(() => {
+        if (active) setServiceAccountsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [clusterId, namespace, open]);
 
   useEffect(() => {
     if (parallelism > 1) {
@@ -600,8 +638,12 @@ export default function K6TestWizard({
         runner: {
           resources: { limits: { cpu, memory } },
           ...(runnerImage ? { image: runnerImage } : {}),
+          ...(serviceAccount ? { serviceAccountName: serviceAccount } : {}),
           ...(runnerEnv.length ? { env: runnerEnv } : {}),
         },
+        ...(resourceKind === "testrun" && serviceAccount
+          ? { starter: { serviceAccountName: serviceAccount } }
+          : {}),
         ...(output.trim() ? { arguments: output.trim() } : {}),
       },
       ...(action === "schedule" ? { cronExpression: cron } : {}),
@@ -665,6 +707,7 @@ export default function K6TestWizard({
       copy.target,
       `${clusters.find((cluster) => cluster.id === clusterId)?.name || clusterId} / ${namespace}`,
     ],
+    [copy.serviceAccount, serviceAccount || copy.defaultServiceAccount],
     ...(combinedMode ? [[copy.actionsTitle, combined.actions.join(" + ")]] : []),
     [copy.parallelism, String(parallelism)],
     [copy.type, launchKind === "job" ? "Job" : "TestRun"],
@@ -691,7 +734,7 @@ export default function K6TestWizard({
         onClose={onClose}
         title={copy.newTest}
         subtitle={`${step + 1} / ${steps.length} · ${steps[step].label}`}
-        maxWidthClassName="max-w-5xl"
+        maxWidthClassName="max-w-6xl"
         className={styles.wizard}
         contained
       >
@@ -755,7 +798,7 @@ export default function K6TestWizard({
               className={`min-h-0 flex-1 pr-2 ${step === 1 ? "overflow-visible" : "overflow-y-auto"}`}
             >
               {step === 0 && (
-                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div className={`${styles.templateGrid} grid sm:grid-cols-2 lg:grid-cols-3 gap-3`}>
                   <button type="button" aria-pressed={combinedMode} className={styles.entry} onClick={() => {
                     allowAutoTemplateRef.current = false; setCombinedMode(true); setGuidedMode(false); setTemplateId("combined"); setName("combined-test"); setParallelism(1); setLaunchKind("job"); setImage(""); setThresholds([]); setSelectedActions([]); setDatasetFiles([]); setEnvVars([]); setStep(1);
                   }}><Layers3 size={24} /><strong>{t("combinedTitle")}</strong><span>{t("combinedHint")}</span><span className="mt-3 font-mono">HTTP · pod_kill · network_latency</span></button>
@@ -769,7 +812,7 @@ export default function K6TestWizard({
                       key={template.id}
                       type="button"
                       onClick={() => applyTemplate(template)}
-                      className={`text-left rounded-2xl border p-4 transition ${templateId === template.id ? "border-purple-500/60 bg-purple-500/10" : "border-slate-800 bg-slate-950/30 hover:border-slate-700"}`}
+                      className={`${styles.templateCard} text-left rounded-2xl border p-4 transition ${templateId === template.id ? "border-purple-500/60 bg-purple-500/10" : "border-slate-800 bg-slate-950/30 hover:border-slate-700"}`}
                       aria-pressed={templateId === template.id}
                     >
                       <div className="flex items-center justify-between gap-2">
@@ -796,7 +839,10 @@ export default function K6TestWizard({
                     <select
                       id="k6-wizard-cluster"
                       value={clusterId}
-                      onChange={(event) => setClusterId(event.target.value)}
+                      onChange={(event) => {
+                        setClusterId(event.target.value);
+                        setServiceAccount("");
+                      }}
                       disabled={clusters.length === 0}
                       className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200 disabled:opacity-50"
                     >
@@ -819,7 +865,10 @@ export default function K6TestWizard({
                     <select
                       id="k6-wizard-namespace"
                       value={namespace}
-                      onChange={(event) => setNamespace(event.target.value)}
+                      onChange={(event) => {
+                        setNamespace(event.target.value);
+                        setServiceAccount("");
+                      }}
                       disabled={!clusterId || namespaces.length === 0}
                       className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200 disabled:opacity-50"
                     >
@@ -833,6 +882,29 @@ export default function K6TestWizard({
                             {item}
                           </option>
                         ))
+                      )}
+                    </select>
+                  </label>
+                  <label className="space-y-2 text-xs text-slate-400" htmlFor="k6-wizard-service-account">
+                    <span>{copy.serviceAccount}</span>
+                    <select
+                      id="k6-wizard-service-account"
+                      value={serviceAccount}
+                      onChange={(event) => setServiceAccount(event.target.value)}
+                      disabled={!clusterId || !namespace}
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-slate-200 disabled:opacity-50"
+                    >
+                      <option value="">{copy.defaultServiceAccount}</option>
+                      {serviceAccountsLoading ? (
+                        <option value="" disabled>{copy.serviceAccountsLoading}</option>
+                      ) : serviceAccountsError ? (
+                        <option value="" disabled>{copy.serviceAccountsLoadError}</option>
+                      ) : serviceAccounts.length > 0 ? (
+                        serviceAccounts.map((account) => (
+                          <option key={account} value={account}>{account}</option>
+                        ))
+                      ) : (
+                        <option value="" disabled>{copy.serviceAccountsEmpty}</option>
                       )}
                     </select>
                   </label>
@@ -852,8 +924,9 @@ export default function K6TestWizard({
                   {guidedMode && <GuidedHTTPForm value={guided} onChange={setGuided} />}
                   {combinedMode && <CombinedTestForm value={combined} namespace={namespace} onChange={value => { setCombined(value); if (hasChaos(value)) setParallelism(1); }} />}
                   {!guidedMode && !combinedMode && <>
-                  <section className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950/30" aria-labelledby="k6-test-actions-title">
-                    <div className="mb-4 flex items-start gap-2.5">
+                  <div className={styles.scriptWorkspace}>
+                  <section className={`${styles.optionsPanel} rounded-2xl border border-slate-200 bg-slate-50/80 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950/30`} aria-labelledby="k6-test-actions-title">
+                    <div className="mb-3 flex items-start gap-2.5">
                       <span className="mt-0.5 rounded-lg bg-purple-100 p-1.5 text-purple-700 dark:bg-purple-500/10 dark:text-purple-300">
                         <SquareCheckBig className="h-4 w-4" aria-hidden="true" />
                       </span>
@@ -862,11 +935,11 @@ export default function K6TestWizard({
                         <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">{copy.actionsDescription}</p>
                       </div>
                     </div>
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="grid gap-2 sm:grid-cols-2">
                       {testActions.map((testAction) => {
                         const checked = selectedActions.includes(testAction.id);
                         return (
-                          <label key={testAction.id} className={`group flex cursor-pointer gap-2.5 rounded-xl border p-3 transition ${checked ? "border-purple-500 bg-purple-50 shadow-sm dark:border-purple-500/60 dark:bg-purple-500/10" : "border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 dark:border-slate-800 dark:bg-slate-950/30 dark:hover:border-slate-700 dark:hover:bg-slate-900/60"}`}>
+                          <label key={testAction.id} className={`${styles.actionOption} group flex cursor-pointer gap-2 rounded-xl border p-2.5 transition ${checked ? "border-purple-500 bg-purple-50 shadow-sm dark:border-purple-500/60 dark:bg-purple-500/10" : "border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 dark:border-slate-800 dark:bg-slate-950/30 dark:hover:border-slate-700 dark:hover:bg-slate-900/60"}`}>
                             <input
                               type="checkbox"
                               checked={checked}
@@ -924,10 +997,10 @@ export default function K6TestWizard({
                     onChange={setScript}
                     editorKey={templateId || "new-test"}
                     label={copy.manualEditor}
-                    layout="split"
-                    height="360px"
+                    layout="stack"
+                    height="460px"
                   />
-
+                  </div>
                   </>}
                   {(guidedMode || combinedMode) && <pre className="max-h-80 overflow-auto rounded-xl bg-slate-950 p-4 text-xs" aria-label={copy.script}>{prepared.script}</pre>}
                   {prepared.error && <p role="alert" className="text-red-300">{prepared.error}</p>}
@@ -1369,21 +1442,28 @@ export default function K6TestWizard({
           )}
 
           <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-800 bg-slate-900 pt-4">
-            <button
-              type="button"
-              onClick={
-                step === 0
-                  ? onClose
-                  : () => {
-                      setError("");
-                      setStep((current) => current - 1);
-                    }
-              }
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-800 px-4 py-2 text-xs text-slate-300 hover:bg-slate-800"
-            >
-              <ChevronLeft className="h-4 w-4" />
-              {step === 0 ? copy.cancel : copy.back}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-800 px-4 py-2 text-xs text-slate-300 hover:bg-slate-800"
+              >
+                {copy.cancel}
+              </button>
+              {step > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError("");
+                    setStep((current) => current - 1);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-xl border border-slate-800 px-4 py-2 text-xs text-slate-300 hover:bg-slate-800"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  {copy.back}
+                </button>
+              )}
+            </div>
             {step < 5 ? (
               <button
                 type="button"

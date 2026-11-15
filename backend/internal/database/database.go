@@ -23,6 +23,7 @@ type ClusterConfig struct {
 	Name                string    `json:"name"`
 	APIServerURL        string    `json:"api_server_url"`
 	AuthType            string    `json:"auth_type"`
+	LocalContext        string    `json:"local_context,omitempty"` // Response-only context name; never credentials.
 	EncryptedData       string    `json:"-"`
 	CACertBase64        string    `json:"ca_cert_base64,omitempty"`
 	CreatedAt           time.Time `json:"created_at"`

@@ -49,6 +49,19 @@
 :global(html[data-theme="system"][data-color-scheme="light"]) .wizard [role="alert"] { background: #fff1f2; color: #9f1239; border-color: #be123c; }
 .wizard pre { background: var(--wiz-field); color: var(--wiz-text) !important; line-height: 1.6; }
 .wizard .entry { background: var(--wiz-selected); border: 1px solid var(--wiz-accent); color: var(--wiz-text); border-radius: 16px; padding: 20px; text-align: start; }
+.templateGrid { align-content: start; }
+.templateCard { min-height: 92px; padding: 14px; border-radius: 14px; }
+.templateGrid .entry { min-height: 132px; padding: 16px; }
+.templateGrid .entry > svg { width: 20px; height: 20px; }
+.templateGrid .entry strong { font-size: 14px; margin: 8px 0 5px; }
+.templateGrid .entry span { font-size: 12px; line-height: 1.45; }
+.scriptWorkspace { display: grid; grid-template-columns: minmax(260px, .85fr) minmax(0, 1.35fr); align-items: start; gap: 16px; }
+.optionsPanel { min-width: 0; padding: 14px; }
+.actionOption { min-height: 68px; }
+.actionOption input[type="checkbox"] { width: 16px; height: 16px; }
+.actionOption span span:first-child { font-size: 12px; }
+.actionOption span span + span { font-size: 11px; line-height: 1.35; }
+.scriptWorkspace > :global(div) { min-width: 0; }
 .entry strong { display: block; margin: 10px 0 8px; font-size: 15px; }
 .entry span { display: block; font-size: 13px; line-height: 1.6; color: var(--wiz-muted); }
 .composer { display: grid; gap: 20px; }
@@ -75,6 +88,7 @@
 .timeline h4 { font-weight: 650; font-size: 14px; margin-bottom: 10px; }
 .timeline p { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-inline-start: 3px solid var(--wiz-accent); padding-inline-start: 12px; }
 .timeline strong { color: var(--wiz-text); }
+@media (max-width: 760px) { .scriptWorkspace { grid-template-columns: 1fr; } .templateGrid .entry { min-height: 0; } }
 @media (max-width: 640px) { .actionGrid, .fields { grid-template-columns: 1fr; } .wizard { padding: 16px; } }
 .wizard label:has(> input[type="checkbox"]:checked) { background: var(--wiz-selected); border-color: var(--wiz-accent); }
 .wizard label:has(> input[type="checkbox"]) [class*="text-"] { color: var(--wiz-text); }
